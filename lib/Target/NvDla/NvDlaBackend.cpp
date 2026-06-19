@@ -22,6 +22,8 @@
 #include "SplitGroupConvPass.h"
 #include "TargetInfo/NvDlaTargetInfo.h"
 #include "TargetInfo/NvDlaTargetMemInfo.h"
+#include "GraphvizONNCIRPass.h"
+#include "PrintONNCIRPass.h"
 
 #include <onnc/Analysis/NodeIRScheduler.h>
 #include <onnc/Analysis/UpdateGraphOutputSize.h>
@@ -165,6 +167,7 @@ void NvDlaBackend::addOnncIrOptimization(PassManager& passManager, OptimizationO
     { nvdla::LegalizePadPass::OperatorWithPads::Conv, 31 },
     { nvdla::LegalizePadPass::OperatorWithPads::MaxPool, 7 }
   };
+  // passManager.add<onnc::PrintONNCIRPass>();
   passManager.add<nvdla::LegalizePadPass>(setting);
   
   passManager.add<nvdla::LegalizeClipToMinMaxPass>();
@@ -190,6 +193,8 @@ void NvDlaBackend::addOnncIrOptimization(PassManager& passManager, OptimizationO
     .add<SplitGroupConvPass>()
     .add<NvDlaCollectReshapeInfoPass>(m_pMeta)
     ;
+
+  // passManager.add<onnc::GraphvizONNCIRPass>();
 }
 
 void NvDlaBackend::addTensorSched(PassManager& passManager)
@@ -225,6 +230,7 @@ void NvDlaBackend::addCodeEmit(PassManager& passManager, const Path& pOutput)
     .add<NvDlaTaskSubmitPass>(&m_pMeta, BLOB_DLA_VERSION, BLOB_EMU_VERSION)
     .add<NvDlaFileGenPass>(&m_pMeta, LOADABLE_VERSION)
     ;
+  // passManager.add<onnc::PrintONNCIRPass>();
 }
 
 void NvDlaBackend::RegisterLowers(LowerRegistry& pRegistry) const

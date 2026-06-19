@@ -21,6 +21,8 @@ add_libonnc_src(
     NvDlaUtil.cpp
     ReplaceFlattenByReshape.cpp
     SplitGroupConvPass.cpp
+    GraphvizONNCIRPass.cpp
+    PrintONNCIRPass.cpp
 )
 
 add_subdirectory(genmem)

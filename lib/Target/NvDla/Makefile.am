@@ -12,6 +12,8 @@ ONNC_TARGET_SOURCES += \
   Target/NvDla/NvDlaTaskSubmitPass.cpp \
   Target/NvDla/NvDlaUtil.cpp \
   Target/NvDla/SplitGroupConvPass.cpp \
+  Target/NvDla/GraphvizONNCIRPass.cpp \
+  Target/NvDla/PrintONNCIRPass.cpp \
   Target/NvDla/Compute/NvDlaShuffle.cpp \
   Target/NvDla/Config/NvFull.cpp \
   Target/NvDla/genmem/genmem.cpp \
