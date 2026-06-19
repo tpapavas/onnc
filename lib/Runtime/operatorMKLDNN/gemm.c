@@ -3,8 +3,8 @@
 #include <stdint.h>
 #include <string.h>
 
-mkldnn_engine_t engine;
-mkldnn_stream_t stream;
+extern mkldnn_engine_t engine;
+extern mkldnn_stream_t stream;
 
 void ONNC_RUNTIME_gemm_float(void* restrict context,
     const float* restrict A, int32_t Adim, const int32_t* restrict Ashape,
