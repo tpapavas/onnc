@@ -31,6 +31,9 @@
 #include <onnc/IR/Compute/Split.h>
 #include <onnc/IR/Compute/Sum.h>
 #include <onnc/IR/Compute/Unsqueeze.h>
+#include <onnc/JSON/Object.h>
+#include <onnc/JSON/Reader.h>
+#include <onnc/JSON/Value.h>
 #include <onnc/Support/Algorithm.h>
 #include <onnc/Support/IOStream.h>
 #include <onnc/Support/Match.h>
@@ -41,6 +44,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <iterator>
 #include <sstream>
 #include <type_traits>
@@ -349,6 +354,72 @@ const std::vector<float>* CodeEmitVisitor::getWeightScales(const Tensor* weight)
 {
   const auto it = m_WeightScales.find(weight);
   return (it == m_WeightScales.end()) ? nullptr : &it->second;
+}
+
+float CodeEmitVisitor::getActivationScale(const std::string& tensorName) const
+{
+  const auto it = m_ActivationScales.find(tensorName);
+  return (it == m_ActivationScales.end()) ? 0.0f : it->second;
+}
+
+void CodeEmitVisitor::loadCalibrationTable()
+{
+  // Only INT8 needs activation scales; FP16 ignores the calibration table.
+  if (DLA_PRECISION != PRECISION_INT8) {
+    return;
+  }
+
+  const char* const path = std::getenv("ONNC_NVDLA_CALIB");
+  if (path == nullptr || *path == '\0') {
+    return;
+  }
+
+  // Called from a noexcept constructor: never let an exception escape. A missing
+  // or malformed table just yields an empty map (the converters then fall back).
+  try {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+      errs() << "[NvDla][int8] cannot open calibration table: " << path << "\n";
+      return;
+    }
+    const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+
+    json::Reader reader;
+    json::Value  root;
+    if (!reader.read(StringRef(content.data(), content.size()), root) || !root.isObject()) {
+      errs() << "[NvDla][int8] failed to parse calibration table: " << path << "\n";
+      return;
+    }
+
+    // calib.json schema: accepts NVDLA's native FLAT table (resnet50.json:
+    // { "<tensor>": {"scale":...} }) AND this repo's wrapped { "data": {...} }.
+    // Disambiguate on top["data"]: the wrapper lacks a "scale" key; a flat tensor
+    // named "data" (ResNet-50 input) HAS "scale". Only the symmetric "scale" used.
+    const json::Object& top = root.toObject();
+    const json::Object* tablePtr = &top;
+    if (top.hasValue("data") && top.get("data").isObject() &&
+        !top.get("data").toObject().hasValue("scale"))
+      tablePtr = &top.get("data").toObject();
+    const json::Object& data = *tablePtr;
+    for (json::Object::const_iterator it = data.begin(), end = data.end(); it != end; ++it) {
+      const json::Value& entry = it->value();
+      if (!entry.isObject()) {
+        continue;
+      }
+      const json::Object& tensorObj = entry.toObject();
+      if (!tensorObj.hasValue("scale")) {
+        continue;
+      }
+      const float scale = static_cast<float>(tensorObj.get("scale").toFloating());
+      m_ActivationScales.emplace(it->key().str(), scale);
+    }
+
+    outs() << "[NvDla][int8] loaded " << m_ActivationScales.size() << " activation scale(s) from " << path << "\n";
+  } catch (const std::exception& e) {
+    errs() << "[NvDla][int8] error reading calibration table: " << e.what() << "\n";
+  } catch (...) {
+    errs() << "[NvDla][int8] unknown error reading calibration table\n";
+  }
 }
 
 const std::vector<float>& CodeEmitVisitor::computeWeightScales(const Tensor* weightTensor, span<const float> weight,

@@ -21,6 +21,7 @@
 #include <onnc/Support/Span.h>
 
 #include <functional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -52,7 +53,9 @@ public:
     , m_pMeta{meta}
     , m_CbufAllocTypeGetter{std::move(cbufAllocTypeGetter)}
     , m_VerboseLevel{verboseLevel}
-  {}
+  {
+    loadCalibrationTable();
+  }
 
   PP_LIST_FOR_EACH(PP_DECL_VISIT, PP_UNWRAP(PP_NVDLA_OP_LIST))
 
@@ -66,6 +69,11 @@ public:
   // out_rescale = SF_in * SF_wt / SF_out (programmed in a later patch).
   // Returns nullptr if the tensor was not packed as INT8 weights.
   const std::vector<float>* getWeightScales(const Tensor* weight) const;
+
+  // Per-tensor INT8 activation scale SF for `tensorName`, from the calibration
+  // table (calib.json). Returns 0.0f if the table has no entry for that name
+  // (callers treat 0 as "no scale" -> fall back, see the converter patch).
+  float getActivationScale(const std::string& tensorName) const;
 
 private:
   MemoryListEntryId packWeight(const Tensor& weight, NvDlaDims destDims, Tensor::Dimension numFrontPaddingChannels,
@@ -111,6 +119,11 @@ private:
   const std::vector<float>& computeWeightScales(const Tensor* weightTensor, span<const float> weight,
                                                 NvDlaDims srcDims);
 
+  // Load per-tensor activation scales from the calibration table named by the
+  // ONNC_NVDLA_CALIB env var (the calib.json this repo's 05b produces) into
+  // m_ActivationScales. INT8 only; no-op (and never throws) otherwise.
+  void loadCalibrationTable();
+
   template <typename Type>
   void packWeightImpl(Type* destData, NvDlaDims destDimsWithFrontPadding, const Tensor* tensor, const float* srcData,
                       NvDlaDims srcDims, Tensor::Dimension numFrontPaddingChannels,
@@ -133,6 +146,10 @@ private:
   // weight tensor -> per-output-filter INT8 scale SF_wt[k]. Populated by
   // computeWeightScales during INT8 weight packing.
   std::unordered_map<const Tensor*, std::vector<float>> m_WeightScales;
+
+  // ONNX tensor name -> per-tensor INT8 activation scale SF. Populated by
+  // loadCalibrationTable from calib.json (empty when not INT8 / no table).
+  std::unordered_map<std::string, float> m_ActivationScales;
 };
 
 } // namespace nvdla
