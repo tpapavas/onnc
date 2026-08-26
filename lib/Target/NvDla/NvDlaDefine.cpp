@@ -252,6 +252,8 @@ NvDlaConstants getConfig(nvdla::ConfigSet configSet, nvdla::ExecutionMode mode, 
   switch (configSet) {
   case nvdla::ConfigSet::nv_full:
     return getConfig<nvdla::ConfigSet::nv_full>(mode, enableLayerFusion);
+  case nvdla::ConfigSet::nv_full_int8:
+    return getConfig<nvdla::ConfigSet::nv_full_int8>(mode, enableLayerFusion);
   }
 
   assert(false && "Meet unsupported config set");

@@ -18,7 +18,8 @@ namespace nvdla {
 
 enum class ConfigSet : unsigned
 {
-  nv_full = 0,
+  nv_full      = 0,
+  nv_full_int8 = 1, // INT8 precision variant of nv_full (same RTL geometry)
 };
 
 enum class ExecutionMode : unsigned

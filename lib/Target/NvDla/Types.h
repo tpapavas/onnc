@@ -32,6 +32,7 @@ template <nvdla::ConfigSet CS>
 using nv_weight_t = typename get_weight_type<CS>::type;
 
 DEFINE_WEIGHT_TYPE(nvdla::ConfigSet::nv_full, std::uint16_t);
+DEFINE_WEIGHT_TYPE(nvdla::ConfigSet::nv_full_int8, std::int8_t);
 
 } // namespace onnc
 

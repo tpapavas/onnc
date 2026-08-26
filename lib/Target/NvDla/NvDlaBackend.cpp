@@ -79,8 +79,10 @@
 #include <onnc/Transforms/TensorSel/Standards/UpsampleLower.h>
 #include <onnc/Transforms/TensorSel/Standards/IdentityLower.h>
 
+#include <cstdlib>
 #include <functional>
 #include <memory>
+#include <string>
 #include <type_traits>
 
 namespace onnc {
@@ -92,10 +94,22 @@ const Version NvDlaBackend::LOADABLE_VERSION = Version(1, 1, 1);
 const Version NvDlaBackend::BLOB_DLA_VERSION = Version(1, 2, 0);
 const Version NvDlaBackend::BLOB_EMU_VERSION = Version(1, 2, 0);
 
+// Select the NVDLA config set. INT8 is opt-in via ONNC_NVDLA_PRECISION=int8
+// (a first-cut signal until a real -mattr/quadruple suffix is wired); anything
+// else keeps the default FP16 nv_full path byte-for-byte unchanged.
+static nvdla::ConfigSet selectConfigSet()
+{
+  const char* const precision = std::getenv("ONNC_NVDLA_PRECISION");
+  if (precision != nullptr && std::string(precision) == "int8") {
+    return nvdla::ConfigSet::nv_full_int8;
+  }
+  return nvdla::ConfigSet::nv_full;
+}
+
 NvDlaBackend::NvDlaBackend(const TargetOptions& pOptions)
   : TargetBackend{pOptions}
   , NvDlaConstants(
-      getConfig(nvdla::ConfigSet::nv_full, nvdla::ExecutionMode::direct, false))
+      getConfig(selectConfigSet(), nvdla::ExecutionMode::direct, false))
   , m_VerboseLevel(pOptions.getVerboseLevel())
   , m_pMeta(*this)
   , m_CodeEmitVisitor(*this, m_pMeta,
