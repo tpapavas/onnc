@@ -36,6 +36,14 @@ PP_DEFINE_VISIT(Concat, pOp)
         MemoryListEntryId          output_mid = m_pMeta.getMemoryListEntryId(*output_tensor);
         ILoadable::MemoryListEntry output_mle = m_pMeta.getMemoryListEntry(output_mid);
 
+        // [int8 fix] genmem/RUBIK derives the BDMA precision (Register.hpp: elementSize==1
+        // -> int8) and the cube channel-atom size (ATOMIC_K) from the global
+        // genmem::elementSize. It defaults to 2 (fp16) and is NEVER initialized for int8
+        // (init_genmem is unused), so int8 concats are emitted with fp16 (2-byte) layout and
+        // corrupt. Set it from the compile precision before building the concat cubes.
+        genmem::elementSize = (DLA_PRECISION == PRECISION_INT8) ? BPE_PRECISION_INT8 : BPE_PRECISION_FP16;
+        genmem::ATOMIC_K    = (genmem::elementSize == 1) ? 32 : 16;
+
         genmem::NvDlaMemory mem(genmem::memWidth, this->m_pMeta.m_MemoryListEntries.size());
 
         // 1. generate a input cube
