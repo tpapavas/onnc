@@ -35,7 +35,7 @@ PP_DEFINE_VISIT(Softmax, pOp)
   struct emu_softmax_buffer_descs* op_buf = (struct emu_softmax_buffer_descs*)(&(softmax_op->op_buf));
   op_buf->src_data.addressIndex           = issueEmuAddr(input_mid);
   op_buf->src_data.size                   = m_pMeta.getMemoryListEntrySize(input_mid);
-  op_buf->src_data.format                 = DLA_PRECISION;
+  op_buf->src_data.format                 = 3; //DLA_PRECISION;
   op_buf->src_data.width                  = input_input_dims[3];
   op_buf->src_data.height                 = input_input_dims[2];
   op_buf->src_data.channel                = input_input_dims[1];
@@ -44,7 +44,7 @@ PP_DEFINE_VISIT(Softmax, pOp)
 
   op_buf->dst_data.addressIndex = issueEmuAddr(output_mid);
   op_buf->dst_data.size         = m_pMeta.getMemoryListEntrySize(output_mid);
-  op_buf->dst_data.format       = DLA_PRECISION;
+  op_buf->dst_data.format       = 3; //DLA_PRECISION;
   op_buf->dst_data.width        = output_output_dims[3];
   op_buf->dst_data.height       = output_output_dims[2];
   op_buf->dst_data.channel      = output_output_dims[1];
