@@ -48,13 +48,20 @@ PP_DEFINE_VISIT(AveragePool, pOp)
   avgpool_op->op_dep.op_type    = DLA_OP_PDP;
 
   struct dla_pdp_op_desc* avgpool_desc = (struct dla_pdp_op_desc*)(&(avgpool_op->op_desc));
-  avgpool_desc->partial_in_width_first = 0;
+  // [int8 fix] The cmod's INT8 average-pool accumulates over `partial_in_width_first` input
+  // columns and writes `partial_width_first` output columns; ONNC hardcoded these to 0, so int8
+  // avg accumulates 0 columns -> all-zero output (FP16 tolerates 0 via a different line-buffer
+  // path -- which is why only int8 GAP breaks). Program the single-split values exactly as
+  // nvdla_compiler (PDPNode.cpp): firstOutWidth = output width;
+  // firstInWidth = (outW-1)*strideX + kernelW - padLeft. (Single split -- holds for the small
+  // feature maps here; wide inputs would need the reference's multi-split logic.)
+  avgpool_desc->split_num              = 1;
+  avgpool_desc->partial_width_first    = output_Y_dims[3];
+  avgpool_desc->partial_in_width_first = (output_Y_dims[3] - 1) * strides[1] + kernel_shape[1] - pad_shapes[1];
   avgpool_desc->partial_in_width_mid   = 0;
   avgpool_desc->partial_in_width_last  = 0;
-  avgpool_desc->partial_width_first    = 0;
   avgpool_desc->partial_width_mid      = 0;
   avgpool_desc->partial_width_last     = 0;
-  avgpool_desc->split_num              = 1;
   avgpool_desc->pool_mode              = POOL_MODE_AVG;
   avgpool_desc->pool_width             = kernel_shape[1] - 1;
   avgpool_desc->pool_height            = kernel_shape[0] - 1;
