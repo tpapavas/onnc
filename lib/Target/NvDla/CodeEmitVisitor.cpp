@@ -987,6 +987,32 @@ void CodeEmitVisitor::emitSdp(const ComputeOperator& op, const Tensor& first, co
     }
   }
 
+  // INT8 eltwise ADD of two feature tensors (e.g. a ResNet residual): the inputs
+  // carry different scales, so align the X1 operand B to A's scale via the X1 ALU
+  // converter, then rescale (A+B) to SF_out via out_cvt:
+  //   out = (A*SF_a + B*SF_b)/SF_out = ((A + B*(SF_b/SF_a)) * (SF_a/SF_out)).
+  // nvdla's SDPEltWiseOp assumes the inputs already share one scale (single
+  // out_cvt, no operand cvt); we instead align here -- whether the HW applies the
+  // per-element X1 cvt is the cmod-gated assumption. See docs/ONNC_INT8_PLAN.md E.
+  if (DLA_PRECISION == PRECISION_INT8 && isa<Add>(&op) && !isConstant(second)) {
+    const float sfA   = getActivationScale(first.getName());
+    const float sfB   = getActivationScale(second.getName());
+    const float sfOut = getActivationScale(output.getName());
+    if (sfA > 0.0f && sfB > 0.0f && sfOut > 0.0f) {
+      const internal::CvtParams aluCvt = internal::realToCvt(static_cast<double>(sfB) / static_cast<double>(sfA));
+      desc.x1_op.cvt.alu_cvt.scale     = aluCvt.scale;
+      desc.x1_op.cvt.alu_cvt.truncate  = aluCvt.truncate;
+      desc.x1_op.cvt.alu_cvt.enable    = 1;
+      desc.x1_op.cvt.alu_cvt.offset    = 0;
+      const internal::CvtParams outCvt = internal::realToCvt(static_cast<double>(sfA) / static_cast<double>(sfOut));
+      desc.out_cvt.scale               = outCvt.scale;
+      desc.out_cvt.truncate            = outCvt.truncate;
+      outs() << "[NvDla][int8] eltwise-add " << output.getName() << " : SF_a=" << sfA << " SF_b=" << sfB
+             << " SF_out=" << sfOut << " alu_cvt=" << aluCvt.scale << "/" << static_cast<int>(aluCvt.truncate)
+             << " out_cvt=" << outCvt.scale << "/" << static_cast<int>(outCvt.truncate) << "\n";
+    }
+  }
+
   auto& surface = getSurface<NvDlaOpType::sdp>(*operation);
 
   const NvDlaCubeInfo firstCubeInfo = makeCubeInfo(*this, NVDLA_CUBE_FEATURE, first);
