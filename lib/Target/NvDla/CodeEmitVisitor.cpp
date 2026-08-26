@@ -326,6 +326,106 @@ private:
   dla_data_cube& cube_;
 };
 
+//===----------------------------------------------------------------------===//
+// INT8 requantization primitives
+//
+// NVDLA is integer-only: a conv accumulates int8 x int8 -> int32, then an SDP
+// "converter" (dla_cvt_param { int16_t scale; uint8_t truncate; ... }) rescales
+// back to int8 with a fixed-point multiply:
+//
+//     out_i8 = saturate_round( (acc - offset) * scale >> truncate )
+//
+// For a conv layer the real output rescale is
+//
+//     R = SF_in * SF_wt / SF_out         (per the NVDLA precision spec)
+//
+// where SF_in/SF_out are per-tensor activation scales (calib.json) and SF_wt is
+// the per-output-filter weight scale (per-channel / per-kernel, computed in
+// packWeight). These helpers decompose a real ratio into the exact hardware
+// field types: int16 scale, uint8 truncate (shift).
+//===----------------------------------------------------------------------===//
+
+struct CvtParams
+{
+  std::int16_t scale;
+  std::uint8_t truncate;
+};
+
+constexpr std::int16_t kCvtScaleMax = 32767;   // INT16_MAX
+constexpr std::int16_t kCvtScaleMin = -32768;  // INT16_MIN
+// The dla_cvt_param truncate field is stored in a uint8, but the NVDLA hardware
+// converter shifter is a 5-bit unsigned integer (UINT5, range [0,31]) -- see the
+// NVDLA precision spec (nvdla.org/hw/v1/ias/precision.html: "shifter is a 5 bits
+// unsigned integer") and the nvdla_compiler decomposition
+// (calculateScaleAndShiftFromScalar warns for shifts > 31). Cap the search at 31
+// so every shift we emit is valid for the hardware.
+constexpr int kCvtTruncateMax = 31;
+
+// Decompose a real rescale ratio R >= 0 into R ~= scale / 2^truncate with scale
+// in int16 and truncate in uint8. Picks the LARGEST truncate that keeps |scale|
+// within int16 for maximum precision (the standard NVDLA decomposition). A
+// degenerate ratio maps to the identity converter (scale 1, truncate 0).
+inline CvtParams realToCvt(double ratio)
+{
+  if (!(ratio > 0.0) || !std::isfinite(ratio)) {
+    return CvtParams{1, 0};
+  }
+  for (int shift = kCvtTruncateMax; shift >= 0; --shift) {
+    const double scaled = std::round(std::ldexp(ratio, shift)); // ratio * 2^shift
+    if (std::fabs(scaled) <= static_cast<double>(kCvtScaleMax)) {
+      return CvtParams{static_cast<std::int16_t>(scaled), static_cast<std::uint8_t>(shift)};
+    }
+  }
+  // Ratio too large even at shift 0 -> saturate the scale.
+  return CvtParams{kCvtScaleMax, 0};
+}
+
+// Per-kernel converter: NVDLA's out_cvt holds a single per-tensor shift, so a
+// per-channel rescale is expressed as one SHARED truncate plus a per-channel
+// int16 multiplier (the SDP per-kernel operand). Pick the largest shared shift
+// that keeps every channel's multiplier within int16, then quantize each ratio.
+struct PerChannelCvt
+{
+  std::uint8_t              truncate;
+  std::vector<std::int16_t> mult; // one int16 multiplier per output channel
+};
+
+inline PerChannelCvt realToPerChannelCvt(const std::vector<double>& ratios)
+{
+  PerChannelCvt out;
+  out.truncate = 0;
+  out.mult.assign(ratios.size(), 0);
+  if (ratios.empty()) {
+    return out;
+  }
+
+  double maxRatio = 0.0;
+  for (const double r : ratios) {
+    if (std::isfinite(r) && r > maxRatio) {
+      maxRatio = r;
+    }
+  }
+  if (!(maxRatio > 0.0)) {
+    return out; // all-zero ratios -> zero multipliers
+  }
+
+  int shared = 0;
+  for (int shift = kCvtTruncateMax; shift >= 0; --shift) {
+    if (std::round(std::ldexp(maxRatio, shift)) <= static_cast<double>(kCvtScaleMax)) {
+      shared = shift;
+      break;
+    }
+  }
+  out.truncate = static_cast<std::uint8_t>(shared);
+
+  for (std::size_t k = 0; k < ratios.size(); ++k) {
+    double m = std::round(std::ldexp(ratios[k], shared));
+    m        = std::max(static_cast<double>(kCvtScaleMin), std::min(static_cast<double>(kCvtScaleMax), m));
+    out.mult[k] = static_cast<std::int16_t>(m);
+  }
+  return out;
+}
+
 } // namespace internal
 
 using namespace internal;

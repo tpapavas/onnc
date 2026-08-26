@@ -23,6 +23,43 @@ PP_DEFINE_VISIT(Conv, pOp)
   NvDlaCubeInfo Y_cube(*this, NVDLA_CUBE_FEATURE, output_Y_dims[0], output_Y_dims[1], output_Y_dims[2],
                        output_Y_dims[3]);
 
+  // INT8 requantization (computation only in this patch; the SDP per-kernel
+  // operand application + cmod verification land in the next patch). Build the
+  // per-output-channel rescale R[k] = SF_in * SF_wt[k] / SF_out and decompose it
+  // into NVDLA's (shared uint8 truncate, per-channel int16 multiplier) form.
+  if (DLA_PRECISION == PRECISION_INT8) {
+    const float sfIn  = getActivationScale(input_X_t->getName());
+    const float sfOut = getActivationScale(output_Y_t->getName());
+
+    const std::vector<float>* wtScales = getWeightScales(input_W_t);
+    if (wtScales == nullptr) {
+      if (const FloatTensor* const wft = dynamic_cast<const FloatTensor*>(input_W_t)) {
+        computeWeightScales(input_W_t, wft->getValues(), NvDlaDims(*input_W_t));
+        wtScales = getWeightScales(input_W_t);
+      }
+    }
+
+    if (sfIn > 0.0f && sfOut > 0.0f && wtScales != nullptr) {
+      std::vector<double> ratios(wtScales->size());
+      for (std::size_t k = 0; k < wtScales->size(); ++k) {
+        ratios[k] = static_cast<double>(sfIn) * (*wtScales)[k] / static_cast<double>(sfOut);
+      }
+      const internal::PerChannelCvt pc = internal::realToPerChannelCvt(ratios);
+      std::int16_t mlo = pc.mult.empty() ? 0 : pc.mult.front();
+      std::int16_t mhi = mlo;
+      for (const std::int16_t m : pc.mult) {
+        mlo = std::min(mlo, m);
+        mhi = std::max(mhi, m);
+      }
+      outs() << "[NvDla][int8] requant " << output_Y_t->getName() << " : SF_in=" << sfIn << " SF_out=" << sfOut
+             << " ch=" << ratios.size() << " shared_truncate=" << static_cast<int>(pc.truncate)
+             << " mult[int16]=[" << mlo << ".." << mhi << "]\n";
+    } else {
+      outs() << "[NvDla][int8] requant " << output_Y_t->getName() << " : missing scales (SF_in=" << sfIn
+             << " SF_out=" << sfOut << " have_wt=" << (wtScales != nullptr) << ")\n";
+    }
+  }
+
   // Prepare attributes
   int32_t number_of_dilations = pOp.getDilations().vector().size();
   int32_t dilations[2]        = {1, 1};
