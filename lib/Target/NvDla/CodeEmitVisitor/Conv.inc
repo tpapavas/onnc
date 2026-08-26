@@ -33,7 +33,8 @@ PP_DEFINE_VISIT(Conv, pOp)
   // SDP (ConvCoreNode.cpp: setOutTruncate(0)/setPraTruncate(0)) -- and the whole
   // shared shift lives in the SDP X1 stage (ScaleOp.cpp: x1Params().setTruncate).
   bool                      int8Requant = false;
-  std::vector<std::int16_t> requantMult;     // per output channel, m[k] (int16)
+  std::vector<std::int16_t> requantMult;     // per output channel, m[k] (int16) -> SDP X1 MUL
+  std::vector<std::int16_t> requantBias;     // per output channel, round(b[k]/SF_out) (int16) -> SDP X2 ADD
   int                       sdpShift    = 0;  // SDP x1_op.truncate (full shared shift, UINT5)
   if (DLA_PRECISION == PRECISION_INT8) {
     const float sfIn  = getActivationScale(input_X_t->getName());
@@ -58,8 +59,25 @@ PP_DEFINE_VISIT(Conv, pOp)
       requantMult = pc.mult;
       sdpShift    = static_cast<int>(pc.truncate); // full shift -> SDP X1 (no conv pre-shift)
 
+      // Per-channel bias in the OUTPUT (SF_out) domain, added in SDP X2 after the
+      // X1 rescale: bias_out[k] = round(b_fp32[k] / SF_out), int16. Matches
+      // nvdla_compiler's fused Scale(X1)+Bias(X2) (BatchNormOp.cpp): the bias adds
+      // in the post-rescale (output) domain. See docs/ONNC_INT8_PLAN.md B.6.
+      if (pOp.hasBias()) {
+        if (const FloatTensor* const bft = dynamic_cast<const FloatTensor*>(input_B_t)) {
+          const auto biasVals = bft->getValues();
+          requantBias.resize(biasVals.size());
+          for (std::size_t k = 0; k < biasVals.size(); ++k) {
+            double q = std::round(static_cast<double>(biasVals[k]) / static_cast<double>(sfOut));
+            q       = std::max(-32768.0, std::min(32767.0, q));
+            requantBias[k] = static_cast<std::int16_t>(q);
+          }
+        }
+      }
+
       outs() << "[NvDla][int8] requant " << output_Y_t->getName() << " : SF_in=" << sfIn << " SF_out=" << sfOut
-             << " ch=" << ratios.size() << " x1_truncate=" << sdpShift << "\n";
+             << " ch=" << ratios.size() << " x1_truncate=" << sdpShift
+             << " bias=" << (requantBias.empty() ? "no" : "int16/out-domain") << "\n";
     } else {
       outs() << "[NvDla][int8] requant " << output_Y_t->getName() << " : missing scales -> identity (SF_in=" << sfIn
              << " SF_out=" << sfOut << " have_wt=" << (wtScales != nullptr) << ")\n";
@@ -118,7 +136,9 @@ PP_DEFINE_VISIT(Conv, pOp)
 
     NvDlaCubeInfo B_info(*this, NVDLA_CUBE_FEATURE, numOutputChannelsPerGroup, 1, 1, 1);
 
-    if (pOp.hasBias()) {
+    // FP16 / non-requant path uses the fp16 bias here; INT8 requant uses the
+    // int16 output-domain bias (Bq) packed below, so skip this zero blob then.
+    if (pOp.hasBias() && !int8Requant) {
       B_mid  = packBias(*input_B_t, numOutputChannelsPerGroup, outputChannelOffset);
       B_addr = issueDlaAddr(B_mid, B_info);
     }
@@ -131,6 +151,14 @@ PP_DEFINE_VISIT(Conv, pOp)
     if (int8Requant) {
       M_mid  = packRequantMul(requantMult, numOutputChannelsPerGroup, outputChannelOffset);
       M_addr = issueDlaAddr(M_mid, M_info);
+    }
+
+    // INT8: this group's per-kernel int16 bias (output domain) for the SDP X2 ADD.
+    int Bq_mid  = -1;
+    int Bq_addr = -1;
+    if (int8Requant && pOp.hasBias() && !requantBias.empty()) {
+      Bq_mid  = packRequantMul(requantBias, numOutputChannelsPerGroup, outputChannelOffset);
+      Bq_addr = issueDlaAddr(Bq_mid, M_info);
     }
 
     int pad_top       = pads[0];
@@ -344,7 +372,7 @@ PP_DEFINE_VISIT(Conv, pOp)
           add_desc->x2_op.act                  = ACTIVATION_NONE;
           add_desc->x2_op.shift_value          = 0;
           add_desc->x2_op.truncate             = 0;
-          add_desc->x2_op.precision            = DLA_PRECISION;
+          add_desc->x2_op.precision            = PRECISION_INT16; // int16 per-kernel bias operand
           add_desc->x2_op.alu_operand          = 0;
           add_desc->x2_op.mul_operand          = 0;
           add_desc->x2_op.cvt.alu_cvt.scale    = 0;
@@ -410,14 +438,14 @@ PP_DEFINE_VISIT(Conv, pOp)
         add_surf->x1_data.plane_stride = M_info.stride_plane;
         if (pOp.hasBias()) {
           add_surf->x2_data.type         = DLA_MEM_MC;
-          add_surf->x2_data.address      = B_addr;
-          add_surf->x2_data.size         = m_pMeta.getMemoryListEntrySize(B_mid);
+          add_surf->x2_data.address      = Bq_addr; // int16 output-domain bias cube
+          add_surf->x2_data.size         = m_pMeta.getMemoryListEntrySize(Bq_mid);
           add_surf->x2_data.width        = 1;
           add_surf->x2_data.height       = 1;
           add_surf->x2_data.channel      = numOutputChannelsPerGroup;
-          add_surf->x2_data.line_stride  = B_info.stride_line;
-          add_surf->x2_data.surf_stride  = B_info.stride_surface;
-          add_surf->x2_data.plane_stride = B_info.stride_plane;
+          add_surf->x2_data.line_stride  = M_info.stride_line;
+          add_surf->x2_data.surf_stride  = M_info.stride_surface;
+          add_surf->x2_data.plane_stride = M_info.stride_plane;
         }
       } else if (pOp.hasBias()) {
         add_surf->x1_data.type         = DLA_MEM_MC;
