@@ -23,10 +23,18 @@ PP_DEFINE_VISIT(Conv, pOp)
   NvDlaCubeInfo Y_cube(*this, NVDLA_CUBE_FEATURE, output_Y_dims[0], output_Y_dims[1], output_Y_dims[2],
                        output_Y_dims[3]);
 
-  // INT8 requantization (computation only in this patch; the SDP per-kernel
-  // operand application + cmod verification land in the next patch). Build the
-  // per-output-channel rescale R[k] = SF_in * SF_wt[k] / SF_out and decompose it
-  // into NVDLA's (shared uint8 truncate, per-channel int16 multiplier) form.
+  // INT8 requantization. Build the per-output-channel rescale
+  //   R[k] = SF_in * SF_wt[k] / SF_out
+  // and decompose it into NVDLA's (shared shift, per-channel int16 multiplier)
+  // form. The multipliers are applied as the SDP per-kernel MUL operand
+  // (packRequantMul) and the shift as the SDP X1 truncate. This mirrors
+  // nvdla_compiler exactly (verified against nvdla/sw, see docs/ONNC_INT8_PLAN.md
+  // Part D): the conv does NO pre-shift -- it hands the int32 accumulator to the
+  // SDP (ConvCoreNode.cpp: setOutTruncate(0)/setPraTruncate(0)) -- and the whole
+  // shared shift lives in the SDP X1 stage (ScaleOp.cpp: x1Params().setTruncate).
+  bool                      int8Requant = false;
+  std::vector<std::int16_t> requantMult;     // per output channel, m[k] (int16)
+  int                       sdpShift    = 0;  // SDP x1_op.truncate (full shared shift, UINT5)
   if (DLA_PRECISION == PRECISION_INT8) {
     const float sfIn  = getActivationScale(input_X_t->getName());
     const float sfOut = getActivationScale(output_Y_t->getName());
@@ -39,23 +47,21 @@ PP_DEFINE_VISIT(Conv, pOp)
       }
     }
 
-    if (sfIn > 0.0f && sfOut > 0.0f && wtScales != nullptr) {
+    if (sfIn > 0.0f && sfOut > 0.0f && wtScales != nullptr && !wtScales->empty()) {
       std::vector<double> ratios(wtScales->size());
       for (std::size_t k = 0; k < wtScales->size(); ++k) {
         ratios[k] = static_cast<double>(sfIn) * (*wtScales)[k] / static_cast<double>(sfOut);
       }
       const internal::PerChannelCvt pc = internal::realToPerChannelCvt(ratios);
-      std::int16_t mlo = pc.mult.empty() ? 0 : pc.mult.front();
-      std::int16_t mhi = mlo;
-      for (const std::int16_t m : pc.mult) {
-        mlo = std::min(mlo, m);
-        mhi = std::max(mhi, m);
-      }
+
+      int8Requant = true;
+      requantMult = pc.mult;
+      sdpShift    = static_cast<int>(pc.truncate); // full shift -> SDP X1 (no conv pre-shift)
+
       outs() << "[NvDla][int8] requant " << output_Y_t->getName() << " : SF_in=" << sfIn << " SF_out=" << sfOut
-             << " ch=" << ratios.size() << " shared_truncate=" << static_cast<int>(pc.truncate)
-             << " mult[int16]=[" << mlo << ".." << mhi << "]\n";
+             << " ch=" << ratios.size() << " x1_truncate=" << sdpShift << "\n";
     } else {
-      outs() << "[NvDla][int8] requant " << output_Y_t->getName() << " : missing scales (SF_in=" << sfIn
+      outs() << "[NvDla][int8] requant " << output_Y_t->getName() << " : missing scales -> identity (SF_in=" << sfIn
              << " SF_out=" << sfOut << " have_wt=" << (wtScales != nullptr) << ")\n";
     }
   }
@@ -115,6 +121,16 @@ PP_DEFINE_VISIT(Conv, pOp)
     if (pOp.hasBias()) {
       B_mid  = packBias(*input_B_t, numOutputChannelsPerGroup, outputChannelOffset);
       B_addr = issueDlaAddr(B_mid, B_info);
+    }
+
+    // INT8: emit this group's per-kernel requant multipliers as a 2-byte SDP
+    // operand cube (consumed by the bias-add SDP's x1 MUL stage below).
+    int           M_mid  = -1;
+    int           M_addr = -1;
+    NvDlaCubeInfo M_info(*this, NVDLA_CUBE_SDP_X_ALU_OR_MUL_TWO_BYTE, 1, numOutputChannelsPerGroup, 1, 1);
+    if (int8Requant) {
+      M_mid  = packRequantMul(requantMult, numOutputChannelsPerGroup, outputChannelOffset);
+      M_addr = issueDlaAddr(M_mid, M_info);
     }
 
     int pad_top       = pads[0];
@@ -232,6 +248,10 @@ PP_DEFINE_VISIT(Conv, pOp)
       conv_desc->in_precision       = DLA_PRECISION;
       conv_desc->out_precision      = DLA_PRECISION;
       conv_desc->out_cvt.scale      = 1;
+      // No conv pre-shift: the conv hands the int32 accumulator to the SDP and the
+      // whole rescale (per-channel MUL + shift) happens there -- matching
+      // nvdla_compiler (ConvCoreNode.cpp sets out/pra truncate to 0).
+      conv_desc->out_cvt.truncate   = 0;
       conv_desc->out_cvt.enable     = 1;
       conv_desc->pad_val            = 0;
 
@@ -283,13 +303,63 @@ PP_DEFINE_VISIT(Conv, pOp)
       add_desc->lut_index              = -1;
       add_desc->conv_mode              = 0;
       add_desc->out_cvt.scale          = 1;
+      // INT8: the SDP out_cvt stays identity; the residual shift S lives in the X1
+      // stage (x1_op.truncate) so it is applied right after the per-kernel MUL and
+      // BEFORE the X2 bias add (which is therefore in the SF_out domain) -- this is
+      // how nvdla_compiler programs the per-kernel scale (x1Params().setTruncate).
       add_desc->out_cvt.truncate       = 0;
       add_desc->out_cvt.enable         = 1;
       add_desc->out_cvt.offset         = 0;
       add_desc->conv_mode              = CONV_MODE_DIRECT;
       add_desc->batch_num              = 1;
       add_desc->batch_stride           = 0;
-      if (pOp.hasBias()) {
+      if (int8Requant) {
+        // x1 = per-kernel MUL: apply the per-channel requant multipliers m[k]
+        // (int16 operand cube). x2 = per-kernel ALU SUM: the bias (zero until the
+        // int8-bias patch). Order conv -> MUL(rescale) -> ADD(bias) -> out_cvt.
+        add_desc->x1_op.enable               = 1;
+        add_desc->x1_op.alu_type             = SDP_ALU_OP_SUM;
+        add_desc->x1_op.type                 = SDP_OP_MUL;
+        add_desc->x1_op.mode                 = SDP_OP_PER_KERNEL;
+        add_desc->x1_op.act                  = ACTIVATION_NONE;
+        add_desc->x1_op.shift_value          = 0;
+        add_desc->x1_op.truncate             = static_cast<std::uint8_t>(sdpShift); // full shared shift (UINT5)
+        add_desc->x1_op.precision            = PRECISION_INT16; // 2-byte per-kernel operand
+        add_desc->x1_op.alu_operand          = 0;
+        add_desc->x1_op.mul_operand          = 1;
+        add_desc->x1_op.cvt.alu_cvt.scale    = 0;
+        add_desc->x1_op.cvt.alu_cvt.truncate = 0;
+        add_desc->x1_op.cvt.alu_cvt.enable   = 0;
+        add_desc->x1_op.cvt.alu_cvt.offset   = 0;
+        add_desc->x1_op.cvt.mul_cvt.scale    = 1;
+        add_desc->x1_op.cvt.mul_cvt.truncate = 0;
+        add_desc->x1_op.cvt.mul_cvt.enable   = 0;
+        add_desc->x1_op.cvt.mul_cvt.offset   = 0;
+
+        if (pOp.hasBias()) {
+          add_desc->x2_op.enable               = 1;
+          add_desc->x2_op.alu_type             = SDP_ALU_OP_SUM;
+          add_desc->x2_op.type                 = SDP_OP_ALU;
+          add_desc->x2_op.mode                 = SDP_OP_PER_KERNEL;
+          add_desc->x2_op.act                  = ACTIVATION_NONE;
+          add_desc->x2_op.shift_value          = 0;
+          add_desc->x2_op.truncate             = 0;
+          add_desc->x2_op.precision            = DLA_PRECISION;
+          add_desc->x2_op.alu_operand          = 0;
+          add_desc->x2_op.mul_operand          = 0;
+          add_desc->x2_op.cvt.alu_cvt.scale    = 0;
+          add_desc->x2_op.cvt.alu_cvt.truncate = 0;
+          add_desc->x2_op.cvt.alu_cvt.enable   = 0;
+          add_desc->x2_op.cvt.alu_cvt.offset   = 0;
+          add_desc->x2_op.cvt.mul_cvt.scale    = 0;
+          add_desc->x2_op.cvt.mul_cvt.truncate = 0;
+          add_desc->x2_op.cvt.mul_cvt.enable   = 0;
+          add_desc->x2_op.cvt.mul_cvt.offset   = 0;
+        } else {
+          add_desc->x2_op.enable = 0;
+        }
+        add_desc->y_op.enable = 0;
+      } else if (pOp.hasBias()) {
         add_desc->x1_op.enable               = 1;
         add_desc->x1_op.alu_type             = SDP_ALU_OP_SUM;
         add_desc->x1_op.type                 = SDP_OP_ALU;
@@ -308,12 +378,13 @@ PP_DEFINE_VISIT(Conv, pOp)
         add_desc->x1_op.cvt.mul_cvt.truncate = 0;
         add_desc->x1_op.cvt.mul_cvt.enable   = 0;
         add_desc->x1_op.cvt.mul_cvt.offset   = 0;
+        add_desc->x2_op.enable = 0;
+        add_desc->y_op.enable  = 0;
       } else {
         add_desc->x1_op.enable = 0;
+        add_desc->x2_op.enable = 0;
+        add_desc->y_op.enable  = 0;
       }
-
-      add_desc->x2_op.enable = 0;
-      add_desc->y_op.enable  = 0;
 
       struct dla_sdp_surface_desc* add_surf = (struct dla_sdp_surface_desc*)(&(add_op->op_surf));
       add_surf->src_data.type               = DLA_MEM_HW;
@@ -326,7 +397,29 @@ PP_DEFINE_VISIT(Conv, pOp)
       add_surf->src_data.surf_stride        = 0;
       add_surf->src_data.plane_stride       = 0;
 
-      if (pOp.hasBias()) {
+      if (int8Requant) {
+        // x1 <- per-kernel requant multipliers (int16 cube); x2 <- bias.
+        add_surf->x1_data.type         = DLA_MEM_MC;
+        add_surf->x1_data.address      = M_addr;
+        add_surf->x1_data.size         = m_pMeta.getMemoryListEntrySize(M_mid);
+        add_surf->x1_data.width        = 1;
+        add_surf->x1_data.height       = 1;
+        add_surf->x1_data.channel      = numOutputChannelsPerGroup;
+        add_surf->x1_data.line_stride  = M_info.stride_line;
+        add_surf->x1_data.surf_stride  = M_info.stride_surface;
+        add_surf->x1_data.plane_stride = M_info.stride_plane;
+        if (pOp.hasBias()) {
+          add_surf->x2_data.type         = DLA_MEM_MC;
+          add_surf->x2_data.address      = B_addr;
+          add_surf->x2_data.size         = m_pMeta.getMemoryListEntrySize(B_mid);
+          add_surf->x2_data.width        = 1;
+          add_surf->x2_data.height       = 1;
+          add_surf->x2_data.channel      = numOutputChannelsPerGroup;
+          add_surf->x2_data.line_stride  = B_info.stride_line;
+          add_surf->x2_data.surf_stride  = B_info.stride_surface;
+          add_surf->x2_data.plane_stride = B_info.stride_plane;
+        }
+      } else if (pOp.hasBias()) {
         add_surf->x1_data.type         = DLA_MEM_MC;
         add_surf->x1_data.address      = B_addr;
         add_surf->x1_data.size         = m_pMeta.getMemoryListEntrySize(B_mid);

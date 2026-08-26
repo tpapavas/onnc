@@ -81,6 +81,10 @@ private:
   MemoryListEntryId packImageWeight(const Tensor& weight, NvDlaDims destDims, Tensor::Dimension outputChannelOffset);
   MemoryListEntryId packBias(const Tensor& bias, Tensor::Dimension numDestChannels,
                              Tensor::Dimension srcChannelOffset = 0);
+  // Emit a per-kernel INT8 requantization operand cube: one int16 multiplier per
+  // output channel (the SDP per-kernel MUL operand realizing SF_in*SF_wt[k]/SF_out).
+  MemoryListEntryId packRequantMul(const std::vector<std::int16_t>& mult, Tensor::Dimension numDestChannels,
+                                   Tensor::Dimension srcChannelOffset = 0);
   MemoryListEntryId packSDPOperand(const Tensor* aluTensor, const Tensor* mulTensor, const NvDlaCubeInfo& cubeInfo);
 
   MemoryListEntryId  packFeature(const Tensor& tensor, const NvDlaCubeInfo& cube);

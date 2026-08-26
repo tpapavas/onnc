@@ -669,6 +669,44 @@ MemoryListEntryId CodeEmitVisitor::packBias(const Tensor& bias, Tensor::Dimensio
   return memoryId;
 }
 
+MemoryListEntryId CodeEmitVisitor::packRequantMul(const std::vector<std::int16_t>& mult,
+                                                  Tensor::Dimension numDestChannels, Tensor::Dimension srcChannelOffset)
+{
+  const std::string blob_name = "tb-" + std::to_string(m_pMeta.m_NumBlobs++);
+
+  ILoadable::Blob b;
+  b.name              = blob_name;
+  // One int16 multiplier per output channel (the SDP per-kernel MUL operand is a
+  // 2-byte cube regardless of the int8 feature/weight datapath).
+  b.size              = sizeof(std::int16_t) * UNIT_ALIGNMENT(numDestChannels, MAC_ATOMIC_K);
+  b.version.major     = 0;
+  b.version.minor     = 0;
+  b.version.sub_minor = 0;
+  b.interface         = ILoadable::Interface_NONE;
+  b.subInterface      = 0;
+
+  NvU8* blob_data = new NvU8[b.size];
+  std::memset(blob_data, 0, b.size);
+
+  // NVDLA reads cube data little-endian; reinterpret as int16 on the (LE) host.
+  std::int16_t* const destData = reinterpret_cast<std::int16_t*>(blob_data);
+  for (Tensor::Dimension c = 0; c < numDestChannels; ++c) {
+    const std::size_t k = static_cast<std::size_t>(srcChannelOffset) + c;
+    destData[c]         = (k < mult.size()) ? mult[k] : static_cast<std::int16_t>(0);
+  }
+
+  m_pMeta.m_Loadable.priv()->setSymbolContent(blob_name, b, blob_data);
+
+  const MemoryListEntryId memoryId = m_pMeta.allocateMemory(
+    ILoadable::MemoryDomain_SYSMEM, ILoadable::MemoryFlags_ALLOC | ILoadable::MemoryFlags_SET, b.size);
+
+  ILoadable::MemoryListEntry& memory = m_pMeta.getMemoryListEntry(memoryId);
+  memory.contents.push_back(blob_name);
+  memory.offsets.push_back(0);
+
+  return memoryId;
+}
+
 template <typename Type>
 void CodeEmitVisitor::packWeightImpl(Type* destData, NvDlaDims destDimsWithFrontPadding, const Tensor* tensor,
                                      const float* srcData, NvDlaDims srcDims, Tensor::Dimension numFrontPaddingChannels,
