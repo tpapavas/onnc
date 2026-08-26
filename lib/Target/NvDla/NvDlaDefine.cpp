@@ -142,9 +142,11 @@ int NvDlaConstants::getONNXInitializerOffset(int k, int c, int h, int w, NvDlaDi
 
 int NvDlaConstants::getBlobOffsetForDirectWeight(int k, int c, int h, int w, NvDlaDims dims)
 {
-  // JUNE
-  int element_per_cbuf_entry =
-    WEIGHT_ATOM_CUBE_SIZE / ELEMENT_SIZE; // use new variable instead of ATOMIC_C to cover INT8 in nv_full
+  // Input-channel cube width must be the HW MAC accumulation atom (MAC_ATOMIC_C = 64), the
+  // same fix as packWeightImpl's channel_per_cube. WEIGHT_ATOM_CUBE_SIZE/ELEMENT_SIZE equals
+  // 64 for FP16 (128/2) but 128 for INT8 (128/1), which mis-blocks convs with > 64 input
+  // channels (docs/08 s8b). MAC_ATOMIC_C is correct for both precisions.
+  int element_per_cbuf_entry = MAC_ATOMIC_C;
   // Find parameters
   // printf("MAC_ATOMIC_K=%d  WEIGHT_ATOM_CUBE_SIZE=%d   ELEMENT_SIZE=%d", MAC_ATOMIC_K, WEIGHT_ATOM_CUBE_SIZE,
   // ELEMENT_SIZE);

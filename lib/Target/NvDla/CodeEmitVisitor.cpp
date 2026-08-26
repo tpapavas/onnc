@@ -744,7 +744,17 @@ void CodeEmitVisitor::packWeightImpl(Type* destData, NvDlaDims destDimsWithFront
   const NvDlaDims::value_type H = destDimsWithFrontPadding.h;
   const NvDlaDims::value_type W = destDimsWithFrontPadding.w;
 
-  const int channel_per_cube = WEIGHT_ATOM_CUBE_SIZE / ELEMENT_SIZE;
+  // Input-channel cube width = the HW MAC accumulation atom (MAC_ATOMIC_C = 64), NOT
+  // WEIGHT_ATOM_CUBE_SIZE/ELEMENT_SIZE. The two happen to coincide for FP16 (128/2 = 64)
+  // but diverge for INT8 (128/1 = 128 != 64). The CSC weight fetch walks the blob in
+  // 64-channel blocks (ELEMENT_PER_INPUT_ATOM=64, block_operation_iter over
+  // ceil(C/64) blocks -- vendor/nvdla-hw/cmod/csc/NV_NVDLA_csc.cpp:1062,1145-1182), and
+  // the reference compiler tiles channels by atomicCSize=64 with the kernel loop nested
+  // inside each block (vendor/nvdla-sw .../WeightTranslationUnit.h prep/execWtTrnsOpsForDC).
+  // Using 128 for INT8 packs all 128 channels as one contiguous cube per kernel, so the
+  // second 64-channel accumulation block reads the wrong weights -> scrambled output for
+  // convs with > 64 input channels (docs/08 s8b). MAC_ATOMIC_C is correct for both.
+  const int channel_per_cube = MAC_ATOMIC_C;
   const int w_stride_kgrp    = MAC_ATOMIC_K * C * H * W;
 
   using weight_t = typename std::decay<decltype(*destData)>::type;
