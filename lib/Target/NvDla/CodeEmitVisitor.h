@@ -75,6 +75,15 @@ public:
   // (callers treat 0 as "no scale" -> fall back, see the converter patch).
   float getActivationScale(const std::string& tensorName) const;
 
+  // Like getActivationScale, but if `tensor` has no scale under its own name,
+  // follow a single shaping consumer (Reshape/Squeeze/Flatten/Unsqueeze/Transpose)
+  // or a Relu (gemm->conv+relu -> relu-output scale) to inherit its scale. ReplaceGemmByConv names the conv
+  // output `replace_gemm_by_conv_N` (absent from calib.json) and reshapes it to
+  // the calibrated graph output; without this the final layer falls back to an
+  // identity converter and its int32 accumulator saturates to +/-127. Returns 0
+  // if no scale is reachable.
+  float getActivationScaleResolved(const Tensor* tensor) const;
+
 private:
   MemoryListEntryId packWeight(const Tensor& weight, NvDlaDims destDims, Tensor::Dimension numFrontPaddingChannels,
                                Tensor::Dimension outputChannelOffset);

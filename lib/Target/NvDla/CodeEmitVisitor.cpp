@@ -26,9 +26,12 @@
 #include <onnc/IR/Compute/Mul.h>
 #include <onnc/IR/Compute/OutputOperator.h>
 #include <onnc/IR/Compute/Relu.h>
+#include <onnc/IR/Compute/Flatten.h>
 #include <onnc/IR/Compute/Reshape.h>
 #include <onnc/IR/Compute/Softmax.h>
 #include <onnc/IR/Compute/Split.h>
+#include <onnc/IR/Compute/Squeeze.h>
+#include <onnc/IR/Compute/Transpose.h>
 #include <onnc/IR/Compute/Sum.h>
 #include <onnc/IR/Compute/Unsqueeze.h>
 #include <onnc/JSON/Object.h>
@@ -460,6 +463,30 @@ float CodeEmitVisitor::getActivationScale(const std::string& tensorName) const
 {
   const auto it = m_ActivationScales.find(tensorName);
   return (it == m_ActivationScales.end()) ? 0.0f : it->second;
+}
+
+float CodeEmitVisitor::getActivationScaleResolved(const Tensor* tensor) const
+{
+  if (tensor == nullptr) {
+    return 0.0f;
+  }
+  const float direct = getActivationScale(tensor->getName());
+  if (direct > 0.0f) {
+    return direct;
+  }
+  // Shaping ops are scale-preserving (Part E). A tensor produced just before one
+  // may be absent from calib.json under its own name (e.g. ReplaceGemmByConv's
+  // `replace_gemm_by_conv_N` conv output, reshaped to the calibrated graph
+  // output) OR a Relu (intermediate gemm->conv+relu fuses to the relu-OUTPUT scale).
+  auto& uses = const_cast<Tensor*>(tensor)->getUses();
+  if (uses.size() == 1) {
+    ComputeOperator* user = uses[0].getUser();
+    if (isa<Reshape>(user) || isa<Squeeze>(user) || isa<Unsqueeze>(user) || isa<Flatten>(user) ||
+        isa<Transpose>(user) || isa<Relu>(user)) {
+      return getActivationScaleResolved(static_cast<const Tensor*>(user->getOutput(0)));
+    }
+  }
+  return 0.0f;
 }
 
 void CodeEmitVisitor::loadCalibrationTable()

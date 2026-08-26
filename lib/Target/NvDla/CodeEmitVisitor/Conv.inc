@@ -38,7 +38,10 @@ PP_DEFINE_VISIT(Conv, pOp)
   int                       sdpShift    = 0;  // SDP x1_op.truncate (full shared shift, UINT5)
   if (DLA_PRECISION == PRECISION_INT8) {
     const float sfIn  = getActivationScale(input_X_t->getName());
-    const float sfOut = getActivationScale(output_Y_t->getName());
+    // Resolve across a trailing scale-preserving reshape so the gemm->conv final
+    // layer (output `replace_gemm_by_conv_N`, reshaped to the calibrated graph
+    // output) gets its real SF_out instead of 0 -> identity -> int8 saturation.
+    const float sfOut = getActivationScaleResolved(output_Y_t);
 
     const std::vector<float>* wtScales = getWeightScales(input_W_t);
     if (wtScales == nullptr) {
