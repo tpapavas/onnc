@@ -40,9 +40,11 @@
 #include <onnc/Support/View.h>
 
 #include <algorithm>
+#include <cmath>
 #include <iterator>
 #include <sstream>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -343,6 +345,44 @@ namespace nvdla {
 #include "CodeEmitVisitor/Sum.inc"
 #include "CodeEmitVisitor/Transpose.inc"
 
+const std::vector<float>* CodeEmitVisitor::getWeightScales(const Tensor* weight) const
+{
+  const auto it = m_WeightScales.find(weight);
+  return (it == m_WeightScales.end()) ? nullptr : &it->second;
+}
+
+const std::vector<float>& CodeEmitVisitor::computeWeightScales(const Tensor* weightTensor, span<const float> weight,
+                                                               NvDlaDims srcDims)
+{
+  // Symmetric, per-output-filter weight quantization (the per-channel scheme):
+  // SF_wt[k] = max_abs(filter_k) / 127, so that round(w / SF_wt[k]) lands in
+  // [-127, 127]. The int8 weights and the SF_wt are what NVDLA's converters use
+  // later to realize out_rescale = SF_in * SF_wt / SF_out per layer.
+  const auto cached = m_WeightScales.find(weightTensor);
+  if (cached != m_WeightScales.end()) {
+    return cached->second;
+  }
+
+  const int K           = srcDims.n;                          // output filters
+  const int elemsPerFilt = srcDims.c * srcDims.h * srcDims.w; // C*H*W per filter
+
+  std::vector<float> scales(K, 1.0f);
+  for (int k = 0; k < K; ++k) {
+    float maxAbs = 0.0f;
+    for (int i = 0; i < elemsPerFilt; ++i) {
+      const float v = std::fabs(weight[k * elemsPerFilt + i]);
+      if (v > maxAbs) {
+        maxAbs = v;
+      }
+    }
+    // All-zero filter -> keep scale 1 (the quantized weights are all 0 anyway)
+    // and avoid a divide-by-zero in the packing loop.
+    scales[k] = (maxAbs > 0.0f) ? (maxAbs / 127.0f) : 1.0f;
+  }
+
+  return m_WeightScales.emplace(weightTensor, std::move(scales)).first->second;
+}
+
 MemoryListEntryId CodeEmitVisitor::packWeight(const Tensor& weight, NvDlaDims destDims,
                                               Tensor::Dimension numFrontPaddingChannels,
                                               Tensor::Dimension outputChannelOffset)
@@ -387,11 +427,18 @@ MemoryListEntryId CodeEmitVisitor::packWeight(span<const float> weight, const Te
 
   const auto* srcData = weight.data();
 
-  using weight_type           = nv_weight_t<nvdla::ConfigSet::nv_full>;
-  weight_type* const destData = reinterpret_cast<weight_type*>(blob_data);
-
-  packWeightImpl(destData, destDimsWithFrontPadding, weightTensor, srcData, srcDims, numFrontPaddingChannels,
-                 outputChannelOffset);
+  // INT8 lays weights out as 1-byte int8 (ELEMENT_SIZE = 1) and quantizes them
+  // per output filter; FP16 keeps the 2-byte half path byte-for-byte unchanged.
+  if (DLA_PRECISION == PRECISION_INT8) {
+    computeWeightScales(weightTensor, weight, srcDims); // memoize SF_wt for packWeightImpl + converters
+    using weight_type = nv_weight_t<nvdla::ConfigSet::nv_full_int8>;
+    packWeightImpl(reinterpret_cast<weight_type*>(blob_data), destDimsWithFrontPadding, weightTensor, srcData, srcDims,
+                   numFrontPaddingChannels, outputChannelOffset);
+  } else {
+    using weight_type = nv_weight_t<nvdla::ConfigSet::nv_full>;
+    packWeightImpl(reinterpret_cast<weight_type*>(blob_data), destDimsWithFrontPadding, weightTensor, srcData, srcDims,
+                   numFrontPaddingChannels, outputChannelOffset);
+  }
 
   m_pMeta.m_Loadable.priv()->setSymbolContent(blob_name, b, blob_data);
 
@@ -423,13 +470,20 @@ MemoryListEntryId CodeEmitVisitor::packBias(const Tensor& bias, Tensor::Dimensio
   NvU8* blob_data = new NvU8[b.size];
   std::memset(blob_data, 0, b.size);
 
-  if (const FloatTensor* floatTensor = dynamic_cast<const FloatTensor*>(&bias)) {
-    const auto* srcData = reinterpret_cast<const float*>(floatTensor->getValues().data());
+  // INT8 bias must be quantized into the int32 accumulator domain,
+  // round(bias / (SF_in * SF_wt)), which needs the activation scale SF_in from
+  // the calibration table. That is wired in a later patch (calib ingest + bias);
+  // here we leave the INT8 bias blob zero-initialized rather than write fp16
+  // bytes into it. FP16 keeps the existing half-precision bias path.
+  if (DLA_PRECISION != PRECISION_INT8) {
+    if (const FloatTensor* floatTensor = dynamic_cast<const FloatTensor*>(&bias)) {
+      const auto* srcData = reinterpret_cast<const float*>(floatTensor->getValues().data());
 
-    using weight_type           = nv_weight_t<nvdla::ConfigSet::nv_full>;
-    weight_type* const destData = reinterpret_cast<weight_type*>(blob_data);
+      using weight_type           = nv_weight_t<nvdla::ConfigSet::nv_full>;
+      weight_type* const destData = reinterpret_cast<weight_type*>(blob_data);
 
-    packBiasImpl(destData, numDestChannels, &bias, srcData, srcChannelOffset);
+      packBiasImpl(destData, numDestChannels, &bias, srcData, srcChannelOffset);
+    }
   }
 
   m_pMeta.m_Loadable.priv()->setSymbolContent(blob_name, b, blob_data);
@@ -488,7 +542,14 @@ void CodeEmitVisitor::packWeightImpl(Type* destData, NvDlaDims destDimsWithFront
             assert(srcChannel < srcDims.c);
             assert(src_ofs < srcDims.size());
 
-            *(destData + dest_ofs) = f2float16_ieee(*(srcData + src_ofs));
+            if (DLA_PRECISION == PRECISION_INT8) {
+              // Absolute output filter index, used to pick this filter's scale.
+              const int                 kAbs   = n * MAC_ATOMIC_K + n_ofs + outputChannelOffset;
+              const std::vector<float>& scales = m_WeightScales.at(tensor);
+              *(destData + dest_ofs)           = static_cast<weight_t>(f2int8_ieee(*(srcData + src_ofs) / scales[kAbs]));
+            } else {
+              *(destData + dest_ofs) = f2float16_ieee(*(srcData + src_ofs));
+            }
           }
         }
       }
@@ -916,7 +977,13 @@ void CodeEmitVisitor::packImageWeightImpl(Type* blob, NvDlaDims blobDims, const 
           int src_ofs  = getONNXInitializerOffset(outputChannelOffset + k, c, h, w, srcDims);
           int blob_ofs = getBlobOffsetForImageWeight(k, c, h, w, blobDims);
 
-          *(blob + blob_ofs) = (weight_t)f2float16_ieee(*(srcData + src_ofs));
+          if (DLA_PRECISION == PRECISION_INT8) {
+            const int                 kAbs   = outputChannelOffset + k; // absolute output filter
+            const std::vector<float>& scales = m_WeightScales.at(tensor);
+            *(blob + blob_ofs)               = static_cast<weight_t>(f2int8_ieee(*(srcData + src_ofs) / scales[kAbs]));
+          } else {
+            *(blob + blob_ofs) = (weight_t)f2float16_ieee(*(srcData + src_ofs));
+          }
         }
       }
     }
@@ -944,8 +1011,14 @@ MemoryListEntryId CodeEmitVisitor::packImageWeight(const Tensor& weight, NvDlaDi
   if (const FloatTensor* floatTensor = dynamic_cast<const FloatTensor*>(&weight)) {
     const auto* srcData = reinterpret_cast<const float*>(floatTensor->getValues().data());
 
-    packImageWeightImpl(reinterpret_cast<nv_weight_t<nvdla::ConfigSet::nv_full>*>(blob_data), destDims, &weight,
-                        srcData, NvDlaDims(weight), outputChannelOffset);
+    if (DLA_PRECISION == PRECISION_INT8) {
+      computeWeightScales(&weight, floatTensor->getValues(), NvDlaDims(weight));
+      packImageWeightImpl(reinterpret_cast<nv_weight_t<nvdla::ConfigSet::nv_full_int8>*>(blob_data), destDims, &weight,
+                          srcData, NvDlaDims(weight), outputChannelOffset);
+    } else {
+      packImageWeightImpl(reinterpret_cast<nv_weight_t<nvdla::ConfigSet::nv_full>*>(blob_data), destDims, &weight,
+                          srcData, NvDlaDims(weight), outputChannelOffset);
+    }
   }
 
   m_pMeta.m_Loadable.priv()->setSymbolContent(blob_name, b, blob_data);

@@ -21,6 +21,8 @@
 #include <onnc/Support/Span.h>
 
 #include <functional>
+#include <unordered_map>
+#include <vector>
 
 #ifndef PP_NVDLA_OP_LIST
 #  define PP_NVDLA_OP_LIST                                                                              \
@@ -57,6 +59,13 @@ public:
   void visit(NvDlaShuffle& op) { visit(const_cast<const NvDlaShuffle&>(op)); }
   void visit(const NvDlaShuffle&);
   void visitImpl(const NvDlaShuffle&);
+
+  // Per-output-filter INT8 weight scales SF_wt[k] = max_abs(filter_k) / 127,
+  // recorded when a weight tensor is packed as INT8 (see packWeight). The SDP
+  // converters need these to realize NVDLA's requantization
+  // out_rescale = SF_in * SF_wt / SF_out (programmed in a later patch).
+  // Returns nullptr if the tensor was not packed as INT8 weights.
+  const std::vector<float>* getWeightScales(const Tensor* weight) const;
 
 private:
   MemoryListEntryId packWeight(const Tensor& weight, NvDlaDims destDims, Tensor::Dimension numFrontPaddingChannels,
@@ -97,6 +106,11 @@ private:
   MemoryListEntryId packWeight(const Tensor& weight, NvDlaDims srcDims, NvDlaDims destDims,
                                Tensor::Dimension numFrontPaddingChannels, Tensor::Dimension outputChannelOffset);
 
+  // Compute (once, memoized in m_WeightScales) the per-output-filter INT8 weight
+  // scale for `weightTensor`. `weight`/`srcDims` describe the full fp32 weights.
+  const std::vector<float>& computeWeightScales(const Tensor* weightTensor, span<const float> weight,
+                                                NvDlaDims srcDims);
+
   template <typename Type>
   void packWeightImpl(Type* destData, NvDlaDims destDimsWithFrontPadding, const Tensor* tensor, const float* srcData,
                       NvDlaDims srcDims, Tensor::Dimension numFrontPaddingChannels,
@@ -115,6 +129,10 @@ private:
   NvDlaBackendMeta&         m_pMeta;
   const CbufAllocTypeGetter m_CbufAllocTypeGetter;
   const unsigned            m_VerboseLevel;
+
+  // weight tensor -> per-output-filter INT8 scale SF_wt[k]. Populated by
+  // computeWeightScales during INT8 weight packing.
+  std::unordered_map<const Tensor*, std::vector<float>> m_WeightScales;
 };
 
 } // namespace nvdla
