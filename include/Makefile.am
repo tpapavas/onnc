@@ -304,6 +304,7 @@ nobase_nodist_include_HEADERS = \
 	onnc/Transforms/BuildInputOperators.h \
 	onnc/Transforms/Optimizations/DivideGlobalAPIntoAPs.h \
 	onnc/Transforms/Optimizations/EliminateIdentity.h \
+	onnc/Transforms/Optimizations/EliminateSqueeze.h \
 	onnc/Transforms/Optimizations/ExpandBatchNormalization.h \
 	onnc/Transforms/Optimizations/OptimizationsUtils.h \
 	onnc/Transforms/Optimizations/OptimizationOptions.h \

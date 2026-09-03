@@ -1,6 +1,7 @@
 add_libonnc_src(
   DivideGlobalAPIntoAPs.cpp
   EliminateIdentity.cpp
+  EliminateSqueeze.cpp
   ExpandBatchNormalization.cpp
   OptimizationsUtils.cpp
   PropagateConstWithDiffShape.cpp

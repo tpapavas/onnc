@@ -148,6 +148,7 @@ ONNC_SOURCES = \
 	Transforms/OnnxOptPass.cpp \
 	Transforms/Optimizations/DivideGlobalAPIntoAPs.cpp \
 	Transforms/Optimizations/EliminateIdentity.cpp \
+	Transforms/Optimizations/EliminateSqueeze.cpp \
 	Transforms/Optimizations/ExpandBatchNormalization.cpp \
 	Transforms/Optimizations/OptimizationsUtils.cpp \
 	Transforms/Optimizations/PropagateConstWithDiffShape.cpp \

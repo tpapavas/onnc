@@ -45,6 +45,7 @@
 #include <onnc/Transforms/OnnxOptPass.h>
 #include <onnc/Transforms/Optimizations/DivideGlobalAPIntoAPs.h>
 #include <onnc/Transforms/Optimizations/EliminateIdentity.h>
+#include <onnc/Transforms/Optimizations/EliminateSqueeze.h>
 #include <onnc/Transforms/Optimizations/PropagateConstWithDiffShape.h>
 #include <onnc/Transforms/Optimizations/ReplaceGemmByConv.h>
 #include <onnc/Transforms/Optimizations/SplitConvPass.h>
@@ -188,6 +189,7 @@ void NvDlaBackend::addOnncIrOptimization(PassManager& passManager, OptimizationO
 
   passManager
     .add<EliminateIdentity>()
+    .add<EliminateSqueeze>()
     .add<NvDlaCalibrateAveragePoolResultPass>()
     .add<NvDlaIdentifyShufflePass>()
     .add<SplitGroupConvPass>()
