@@ -436,6 +436,7 @@ using namespace internal;
 namespace nvdla {
 
 #include "CodeEmitVisitor/Add.inc"
+// #include "CodeEmitVisitor/AddEMU.inc"
 #include "CodeEmitVisitor/AveragePool.inc"
 // #include "CodeEmitVisitor/AveragePoolEMU.inc"
 #include "CodeEmitVisitor/Concat.inc"
@@ -447,6 +448,7 @@ namespace nvdla {
 #include "CodeEmitVisitor/MaxPool.inc"
 // #include "CodeEmitVisitor/MaxPoolEMU.inc"
 #include "CodeEmitVisitor/Mul.inc"
+// #include "CodeEmitVisitor/MulEMU.inc"
 #include "CodeEmitVisitor/NvDlaShuffle.inc"
 #include "CodeEmitVisitor/OutputOperator.inc"
 #include "CodeEmitVisitor/Relu.inc"
@@ -1119,6 +1121,145 @@ void CodeEmitVisitor::emitSdp(const ComputeOperator& op, const Tensor& first, co
     .setInfo(outputCubeInfo);
 
   issueDlaOp(std::move(operation));
+}
+
+void CodeEmitVisitor::emitEmuSdp(const ComputeOperator& op, const Tensor& first, const Tensor& second, const Tensor& output)
+{
+  assert(!(isConstant(first) && isConstant(second)) && "cannot support 2 constant tensors");
+  assert(isa<Add>(&op) || isa<Mul>(&op) || isa<Max>(&op) || isa<Min>(&op));
+
+  // make sure the 'first' tensor is always non-constant
+  if (isConstant(first)) {
+    emitSdp(op, second, first, output);
+    return;
+  }
+
+  assert(!isConstant(first));
+
+  const BroadcastCategory category =
+    (isConstant(second) ? getBroadcastCategory(second, first) : getBroadcastCategory(first, second));
+  // auto operation = makeNvDlaOp(NvDlaOpType::sdp);
+  NvDlaEmuOperation* const operation = new NvDlaEmuOperation();
+
+  std::uint8_t opType = isa<Mul>(&op) ? SDP_OP_MUL : SDP_OP_ALU;
+
+  // auto& desc             = getDesc<NvDlaOpType::sdp>(*operation);
+  struct emu_sdp_op_desc* desc = (struct emu_sdp_op_desc*)(&(operation->op_desc));
+  struct emu_common_op_desc          common;
+  std::memset(&common, 0, sizeof(common));
+  common.op_type          = NVDLA_EMU_OP_SDP;
+  desc->common            = common;
+
+  desc->src_precision     = 3; // DLA_PRECISION = 2 but EMU_FORMAT_FF16 = 3
+  desc->dst_precision     = 3; // DLA_PRECISION = 2 but EMU_FORMAT_FF16 = 3
+  desc->lut_index         = -1;
+  desc->out_cvt.scale     = 1;
+  desc->out_cvt.truncate  = 0;
+  desc->out_cvt.enable    = 1;
+  desc->out_cvt.offset    = 0;
+  desc->conv_mode         = CONV_MODE_DIRECT;
+  desc->batch_num         = 1;
+  desc->batch_stride      = 0;
+  desc->x1_op.enable      = 1;
+  desc->x1_op.alu_type    = (isa<Max>(&op) ? SDP_ALU_OP_MAX : (isa<Min>(&op) ? SDP_ALU_OP_MIN : SDP_ALU_OP_SUM));
+  desc->x1_op.type        = opType;
+  desc->x1_op.mode        = getSdpOpMode(category);
+  desc->x1_op.act         = ACTIVATION_NONE;
+  desc->x1_op.shift_value = 0;
+  desc->x1_op.truncate    = 0;
+  desc->x1_op.precision   = 3; // DLA_PRECISION = 2 but EMU_FORMAT_FF16 = 3;
+  if (category == BroadcastCategory::LAYER) {
+    const auto operand = to_<std::vector<float>>(second);
+    assert(size(operand) == 1);
+
+    switch (opType) {
+    case SDP_OP_ALU:
+      desc->x1_op.mul_operand = 0;
+      desc->x1_op.alu_operand = f2float16_ieee(*begin(operand));
+      break;
+    case SDP_OP_MUL:
+      desc->x1_op.alu_operand = 0;
+      desc->x1_op.mul_operand = f2float16_ieee(*begin(operand));
+      break;
+    default:
+      assert(false && "should not reach here");
+    }
+  }
+
+  // auto& surface = getSurface<NvDlaOpType::sdp>(*operation);
+  struct emu_sdp_buffer_descs* surface = (struct emu_sdp_buffer_descs*)(&(operation->op_buf));
+
+  const NvDlaCubeInfo firstCubeInfo = makeCubeInfo(*this, NVDLA_CUBE_FEATURE, first);
+  // NvDlaDataCubeModifier(surface.src_data, NvDlaMemType::mc)
+  //   .setSize(m_pMeta.getMemoryListEntrySize(first))
+  //   .setAddress(issueDlaAddr(first, firstCubeInfo))
+  //   .setInfo(firstCubeInfo);
+  // surface->src_data.type         = static_cast<std::underlying_type<NvDlaMemType>::type>(NvDlaMemType::mc);
+  // surface.src_data.address      = issueDlaAddr(first, firstCubeInfo);
+  int input_mid = m_pMeta.getMemoryListEntryId(first);
+  surface->src_data.addressIndex = issueEmuAddr(input_mid);
+  surface->src_data.size         = m_pMeta.getMemoryListEntrySize(first);
+  surface->src_data.format       = 3; // fp16
+  surface->src_data.width        = firstCubeInfo.dim_w;
+  surface->src_data.height       = firstCubeInfo.dim_h;
+  surface->src_data.channel      = firstCubeInfo.dim_c;
+  surface->src_data.line_stride  = firstCubeInfo.stride_line;
+  surface->src_data.surf_stride  = firstCubeInfo.stride_surface;
+  // surface->src_data.plane_stride = firstCubeInfo.stride_plane;
+
+  if (category == BroadcastCategory::LAYER) {
+    // NvDlaDataCubeModifier(surface->x1_data, NvDlaMemType::hw).setAddress(-1);
+    // surface->src_data.type         = static_cast<std::underlying_type<NvDlaMemType>::type>(NvDlaMemType::hw);
+    surface->src_data.addressIndex = -1;
+  } else {
+    MemoryListEntryId   memoryId;
+    const NvDlaCubeInfo secondCubeInfo = makeCubeInfo(*this, getSdpXSingleCubeType(second, DLA_PRECISION), second);
+    // NvDlaDataCubeModifier(surface.x1_data, NvDlaMemType::mc)
+    //   .setAddress(issueSDPOperand(second, secondCubeInfo, memoryId))
+    //   .setSize(m_pMeta.getMemoryListEntrySize(memoryId))
+    //   .setInfo(secondCubeInfo);
+    // surface->x1_data.type         = static_cast<std::underlying_type<NvDlaMemType>::type>(NvDlaMemType::mc);
+    // surface.x1_data.address      = issueSDPOperand(second, secondCubeInfo, memoryId);
+    MemoryListEntryId x1_mid;
+    if (isConstant(second)) {
+      x1_mid = packSDPOperand(&second, nullptr, secondCubeInfo);
+      // return issueDlaAddr(memoryId, secondCubeInfo);
+    } else {
+      x1_mid = m_pMeta.getMemoryListEntryId(second);
+      // return issueDlaAddr(second, secondCubeInfo);
+    }
+    surface->x1_data.addressIndex = issueEmuAddr(x1_mid);
+    surface->x1_data.format       = 3; // fp16
+    // surface->x1_data.size         = m_pMeta.getMemoryListEntrySize(memoryId);
+    surface->x1_data.size         = m_pMeta.getMemoryListEntrySize(x1_mid);
+    surface->x1_data.width        = firstCubeInfo.dim_w;
+    surface->x1_data.height       = firstCubeInfo.dim_h;
+    surface->x1_data.channel      = firstCubeInfo.dim_c;
+    surface->x1_data.line_stride  = firstCubeInfo.stride_line;
+    surface->x1_data.surf_stride  = firstCubeInfo.stride_surface;
+    // surface->x1_data.plane_stride = firstCubeInfo.stride_plane;
+  }
+
+  const NvDlaCubeInfo outputCubeInfo = makeCubeInfo(*this, NVDLA_CUBE_FEATURE, output);
+  // NvDlaDataCubeModifier(surface.dst_data, NvDlaMemType::mc)
+  //   .setSize(m_pMeta.getMemoryListEntrySize(output))
+  //   .setAddress(issueDlaAddr(output, outputCubeInfo))
+  //   .setInfo(outputCubeInfo);
+  // surface->dst_data.type         = static_cast<std::underlying_type<NvDlaMemType>::type>(NvDlaMemType::mc);
+  // surface.dst_data.address      = issueDlaAddr(output, outputCubeInfo);
+  int output_mid = m_pMeta.getMemoryListEntryId(output);
+  surface->dst_data.addressIndex = issueEmuAddr(output_mid);
+  surface->dst_data.format       = 3; // fp16
+  surface->dst_data.size         = m_pMeta.getMemoryListEntrySize(output);
+  surface->dst_data.width        = outputCubeInfo.dim_w;
+  surface->dst_data.height       = outputCubeInfo.dim_h;
+  surface->dst_data.channel      = outputCubeInfo.dim_c;
+  surface->dst_data.line_stride  = outputCubeInfo.stride_line;
+  surface->dst_data.surf_stride  = outputCubeInfo.stride_surface;
+  // surface->dst_data.plane_stride = outputCubeInfo.stride_plane;
+
+  // issueDlaOp(std::move(operation));
+  issueEmuOp(operation);
 }
 
 void CodeEmitVisitor::packSDPOperandImpl(NvU8* blob, const Tensor* aluTensor, const float* aluData,

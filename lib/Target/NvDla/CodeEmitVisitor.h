@@ -119,6 +119,14 @@ private:
   std::pair<unsigned, bool> tryAllocateDataAndWeightsIntoCBuf(const NvDlaCubeInfo& data, NvDlaCubeInfo& weight,
                                                               Tensor::Dimension yDilation) const;
 
+  // Perform EMU-SDP for 2 input tensors and an output tensor,
+  // the possible value for parameter 'opType' is:
+  //
+  //   1. SDP_OP_ALU
+  //   2. SDP_OP_MUL
+  //
+  void emitEmuSdp(const ComputeOperator& op, const Tensor& first, const Tensor& second, const Tensor& output);
+
 private:
   MemoryListEntryId packWeight(span<const float> weight, const Tensor* weightTensor, NvDlaDims srcDims,
                                NvDlaDims destDims, Tensor::Dimension numFrontPaddingChannels,
