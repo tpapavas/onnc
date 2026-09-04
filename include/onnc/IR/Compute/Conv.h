@@ -114,6 +114,9 @@ public:
 
   bool hasBias() const noexcept { return 2 < getNumOfInputs(); }
 
+  void addRelu() { m_hasRelu = true; }
+  const bool& hasRelu() const { return m_hasRelu.value(); }
+
   // clang-format on
 
   void printAttributes(std::ostream& pOS) const override;
@@ -132,6 +135,7 @@ protected:
   IntsAttr m_KernelShape;
   IntsAttr m_Pads;
   IntsAttr m_Strides;
+  BoolAttr m_hasRelu;
   // clang-format on
 };
 
