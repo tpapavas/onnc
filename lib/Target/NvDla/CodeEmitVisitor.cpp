@@ -452,6 +452,7 @@ namespace nvdla {
 #include "CodeEmitVisitor/NvDlaShuffle.inc"
 #include "CodeEmitVisitor/OutputOperator.inc"
 #include "CodeEmitVisitor/Relu.inc"
+// #include "CodeEmitVisitor/ReluEMU.inc"
 #include "CodeEmitVisitor/Reshape.inc"
 #include "CodeEmitVisitor/Softmax.inc"
 #include "CodeEmitVisitor/Split.inc"
