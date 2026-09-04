@@ -439,6 +439,7 @@ namespace nvdla {
 #include "CodeEmitVisitor/AveragePool.inc"
 #include "CodeEmitVisitor/Concat.inc"
 #include "CodeEmitVisitor/Conv.inc"
+// #include "CodeEmitVisitor/ConvEMU.inc"
 #include "CodeEmitVisitor/Initializer.inc"
 #include "CodeEmitVisitor/InputOperator.inc"
 #include "CodeEmitVisitor/LRN.inc"
