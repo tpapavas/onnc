@@ -10,12 +10,21 @@ namespace genmem {
 vector<onnc::NvDlaDlaOperation*> genmemRegisterToDalOp(onnc::NvDlaBackendMeta&      m_pMeta,
                                                        const std::vector<Register>& regs, NvDlaMemory& memory);
 
+vector<onnc::NvDlaEmuOperation*> genmemRegisterToEmuOp(onnc::NvDlaBackendMeta&      m_pMeta,
+                                                       const std::vector<Register>& regs, NvDlaMemory& memory);
+
 int issue_dlaAddressList(onnc::NvDlaBackendMeta& m_pMeta, int genmem_address_entry, const NvDlaMemory& memory);
 
 onnc::NvDlaDlaOperation* rubik_register_to_dla(onnc::NvDlaBackendMeta& m_pMeta, const Register& reg,
                                                const NvDlaMemory& mem);
 
 onnc::NvDlaDlaOperation* bdma_register_to_dla(onnc::NvDlaBackendMeta& m_pMeta, const Register& reg,
+                                              const NvDlaMemory& mem);
+
+onnc::NvDlaEmuOperation* rubik_register_to_emu(onnc::NvDlaBackendMeta& m_pMeta, const Register& reg,
+                                               const NvDlaMemory& mem);
+
+onnc::NvDlaEmuOperation* bdma_register_to_emu(onnc::NvDlaBackendMeta& m_pMeta, const Register& reg,
                                               const NvDlaMemory& mem);
 } // namespace genmem
 
