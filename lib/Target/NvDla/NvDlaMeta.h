@@ -164,6 +164,9 @@ public:
   LutId                  getLutId(const LutParams& params) const;
   bool                   addLutId(const LutParams& params, LutId id);
   void                   appendOperationMeta(OperationMeta::index_type index, OperationMeta::Category category);
+  bool                   isNewTaskBoundary(OperationMeta::Category category) const noexcept;
+  void                   resetCurrentTaskDlaState() noexcept;
+  std::size_t            nextDlaTaskLocalIndex() noexcept;
   bool                   isLastDlaOperationInTaskEntry(const NvDlaDlaOperation& operation) const;
   static MemoryListEntryId getInvalidMemoryListEntryId();
 
@@ -193,6 +196,7 @@ public:
   std::vector<dla_lut_param*>     m_LUTList;
   NvDlaDlaOperation*              m_pDepOp[DLA_OP_NUM];
   NvDlaDlaOperation*              m_pPrevOp;
+  std::size_t                     m_CurrentTaskLocalDlaOpIndex;
 
   emu_network_desc                m_EmuNetworkDesc;
   std::vector<NvDlaEmuOperation*> m_EMUOperationList;

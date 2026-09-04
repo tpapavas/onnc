@@ -67,6 +67,7 @@ NvDlaBackendMeta::NvDlaBackendMeta(const NvDlaConstants& constants)
   , m_DlaNetworkDesc{}
   , m_NumLUTs{0}
   , m_pPrevOp{nullptr}
+  , m_CurrentTaskLocalDlaOpIndex{0}
   , m_EmuNetworkDesc{}
   , m_NumBlobs{0}
   , m_Loadable{priv::LoadableFactory::newLoadable()}
@@ -331,6 +332,30 @@ void NvDlaBackendMeta::appendOperationMeta(OperationMeta::index_type index, Oper
   }
 
   m_OperationMetas.emplace_back(index, category);
+}
+
+bool NvDlaBackendMeta::isNewTaskBoundary(OperationMeta::Category category) const noexcept
+{
+  return !m_OperationMetas.empty() && m_OperationMetas.back().category != category;
+}
+
+void NvDlaBackendMeta::resetCurrentTaskDlaState() noexcept
+{
+  m_CurrentTaskLocalDlaOpIndex = 0;
+
+  /**
+   * NOTE: This is probably useless as
+   * we reset op_head for every new
+   * task in NvDlaTaskSubmitPass
+   */
+  for (std::size_t idx = 0; idx < DLA_OP_NUM; ++idx) {
+    m_DlaNetworkDesc.op_head[idx] = -1;
+  }
+}
+
+std::size_t NvDlaBackendMeta::nextDlaTaskLocalIndex() noexcept
+{
+  return m_CurrentTaskLocalDlaOpIndex++;
 }
 
 bool NvDlaBackendMeta::isLastDlaOperationInTaskEntry(const NvDlaDlaOperation& operation) const

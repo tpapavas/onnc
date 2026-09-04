@@ -79,25 +79,38 @@ Pass::ReturnType NvDlaTaskSubmitPass::runOnModule(Module& pModule)
 
         NvU8* blob_data = new NvU8[b.size];
 
-        m_pMeta->m_DlaNetworkDesc.operation_desc_index   = m_pMeta->m_AddressListEntries.size() + 2;
-        m_pMeta->m_DlaNetworkDesc.surface_desc_index     = m_pMeta->m_AddressListEntries.size() + 3;
-        m_pMeta->m_DlaNetworkDesc.dependency_graph_index = m_pMeta->m_AddressListEntries.size() + 1;
-        m_pMeta->m_DlaNetworkDesc.lut_data_index =
+        struct dla_network_desc taskDlaNetworkDesc = m_pMeta->m_DlaNetworkDesc;
+        for (std::size_t idx = 0; idx < DLA_OP_NUM; ++idx) {
+          taskDlaNetworkDesc.op_head[idx] = -1;
+        }
+        for (std::size_t i = iTaskStart; i < iTaskEnd; ++i) {
+          const auto& opMeta = m_pMeta->m_OperationMetas[i];
+          NvDlaDlaOperation* op = m_pMeta->m_DLAOperationList[opMeta.index];
+          const int op_type = op->op_dep.op_type;
+          if (taskDlaNetworkDesc.op_head[op_type] < 0) {
+            taskDlaNetworkDesc.op_head[op_type] = op->op_dep.index;
+          }
+        }
+
+        taskDlaNetworkDesc.operation_desc_index   = m_pMeta->m_AddressListEntries.size() + 2;
+        taskDlaNetworkDesc.surface_desc_index     = m_pMeta->m_AddressListEntries.size() + 3;
+        taskDlaNetworkDesc.dependency_graph_index = m_pMeta->m_AddressListEntries.size() + 1;
+        taskDlaNetworkDesc.lut_data_index =
           (m_pMeta->m_LUTList.empty() ? -1 : m_pMeta->m_AddressListEntries.size() + 4);
-        m_pMeta->m_DlaNetworkDesc.roi_array_index = -1;
-        m_pMeta->m_DlaNetworkDesc.surface_index   = -1;
-        m_pMeta->m_DlaNetworkDesc.stat_list_index = -1;
-        m_pMeta->m_DlaNetworkDesc.stat_list_index = -1;
+        taskDlaNetworkDesc.roi_array_index = -1;
+        taskDlaNetworkDesc.surface_index   = -1;
+        taskDlaNetworkDesc.stat_list_index = -1;
+        taskDlaNetworkDesc.stat_list_index = -1;
 
-        m_pMeta->m_DlaNetworkDesc.num_rois       = 1;
-        m_pMeta->m_DlaNetworkDesc.num_operations = numTasks;
-        m_pMeta->m_DlaNetworkDesc.num_luts       = m_pMeta->m_NumLUTs;
-        m_pMeta->m_DlaNetworkDesc.num_addresses  = m_pMeta->m_AddressListEntries.size() + 5;
+        taskDlaNetworkDesc.num_rois       = 1;
+        taskDlaNetworkDesc.num_operations = numTasks;
+        taskDlaNetworkDesc.num_luts       = m_pMeta->m_NumLUTs;
+        taskDlaNetworkDesc.num_addresses  = m_pMeta->m_AddressListEntries.size() + 5;
 
-        m_pMeta->m_DlaNetworkDesc.input_layer = 0;
-        m_pMeta->m_DlaNetworkDesc.dynamic_roi = 0;
+        taskDlaNetworkDesc.input_layer = 0;
+        taskDlaNetworkDesc.dynamic_roi = 0;
 
-        memcpy(blob_data, &(m_pMeta->m_DlaNetworkDesc), sizeof(struct dla_network_desc));
+        memcpy(blob_data, &taskDlaNetworkDesc, sizeof(struct dla_network_desc));
 
         m_pMeta->m_Loadable.priv()->setSymbolContent(blob_name, b, blob_data);
         dla_start = submitMemAllocAddress(b.size, blob_name);

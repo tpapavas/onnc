@@ -887,9 +887,20 @@ AddressListEntryId CodeEmitVisitor::issueDlaAddr(MemoryListEntryId memoryId, con
 
 void CodeEmitVisitor::issueDlaOp(NvDlaDlaOperation* op, NvDlaDlaOperation* op_fuse, NvDlaDlaOperation* op_prev)
 {
+  if (m_pMeta.isNewTaskBoundary(NvDlaBackendMeta::OperationMeta::Category::dla)) {
+    // Each DLA task block should start with a fresh dependency context and a task-local op index space.
+    // Task-to-task ordering is handled by the loadable submit/event graph,
+    // not by op-level consumer links across task boundaries.
+    m_pMeta.resetCurrentTaskDlaState();
+    m_pMeta.m_pPrevOp = nullptr;
+    std::fill(std::begin(m_pMeta.m_pDepOp), std::end(m_pMeta.m_pDepOp), nullptr);
+  }
+
   struct dla_common_op_desc* op_desc = &(op->op_dep);
   int                        op_type = op_desc->op_type;
-  op_desc->index            = m_pMeta.m_DLAOperationList.size();
+  // op_desc->index            = m_pMeta.m_DLAOperationList.size();
+  const std::size_t          op_index = m_pMeta.nextDlaTaskLocalIndex();
+  op_desc->index            = op_index;
   op_desc->roi_index        = 0;
   op_desc->dependency_count = 0;
 
@@ -914,7 +925,7 @@ void CodeEmitVisitor::issueDlaOp(NvDlaDlaOperation* op, NvDlaDlaOperation* op_fu
   }
 
   m_pMeta.m_DlaNetworkDesc.op_head[op_type] = (m_pMeta.m_DlaNetworkDesc.op_head[op_type] < 0)
-                                                ? m_pMeta.m_DLAOperationList.size()
+                                                ? static_cast<int16_t>(op_index)
                                                 : m_pMeta.m_DlaNetworkDesc.op_head[op_type];
 
   m_pMeta.m_DLAOperationList.push_back(op);
@@ -926,7 +937,9 @@ void CodeEmitVisitor::issueDlaOp(NvDlaDlaOperation* op, NvDlaDlaOperation* op_fu
   if (op_fuse != NULL) {
     struct dla_common_op_desc* fuse_op_desc = &(op_fuse->op_dep);
     int                        op_fuse_type = fuse_op_desc->op_type;
-    fuse_op_desc->index                     = m_pMeta.m_DLAOperationList.size();
+    // fuse_op_desc->index                     = m_pMeta.m_DLAOperationList.size();
+    const std::size_t          fuse_index = m_pMeta.nextDlaTaskLocalIndex();
+    fuse_op_desc->index                     = fuse_index;
     fuse_op_desc->roi_index                 = 0;
     fuse_op_desc->dependency_count          = 1;
     fuse_op_desc->fused_parent.index        = op_desc->index;
@@ -950,7 +963,7 @@ void CodeEmitVisitor::issueDlaOp(NvDlaDlaOperation* op, NvDlaDlaOperation* op_fu
     m_pMeta.m_pDepOp[op_fuse_type] = op_fuse;
 
     m_pMeta.m_DlaNetworkDesc.op_head[op_fuse_type] = (m_pMeta.m_DlaNetworkDesc.op_head[op_fuse_type] < 0)
-                                                       ? m_pMeta.m_DLAOperationList.size()
+                                                       ? static_cast<int16_t>(fuse_index)
                                                        : m_pMeta.m_DlaNetworkDesc.op_head[op_fuse_type];
 
     m_pMeta.m_DLAOperationList.push_back(op_fuse);
