@@ -46,6 +46,19 @@
 #define NVDLA_EMU_OP_RUBIK    5
 /** @} */
 
+/**
+ * @name Buffer Format
+ * How the emulator reads an emu_buffer_desc's data (same values as the runtime's EMUInterface.h)
+ * @{
+ */
+#define EMU_FORMAT_INT8     0
+#define EMU_FORMAT_INT8_8   1
+#define EMU_FORMAT_INT16    2
+#define EMU_FORMAT_FF16     3
+#define EMU_FORMAT_UINT8    4
+#define EMU_FORMAT_UINT16   5
+/** @} */
+
 struct emu_cvt_param {
 	int16_t  scale;
 	uint8_t  truncate;
