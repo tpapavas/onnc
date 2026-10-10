@@ -29,6 +29,12 @@ PP_DEFINE_VISIT(Relu, pOp)
 
 //   relu_desc->src_precision              = DLA_PRECISION;
   relu_desc->src_precision              = 3; // DLA_PRECISION = 2 but EMU_FORMAT_FF16 = 3;
+  /**
+   * Temporary solution.
+   * Attempt to map dla_interface precision consts
+   * to emu_interface ones.
+   */
+  relu_desc->src_precision              = DLA_PRECISION + 1;
   relu_desc->dst_precision              = 3; // DLA_PRECISION = 2 but EMU_FORMAT_FF16 = 3;
   relu_desc->lut_index                  = -1;
   relu_desc->conv_mode                  = 0;
@@ -36,6 +42,21 @@ PP_DEFINE_VISIT(Relu, pOp)
   relu_desc->out_cvt.truncate           = 0;
   relu_desc->out_cvt.enable             = 1;
   relu_desc->out_cvt.offset             = 0;
+  // INT8: ReLU is max(0,x); the SDP applies ACTIVATION_RELU then the out converter
+  // rescales the kept positive values from input scale to output scale:
+  // out_cvt = realToCvt(SF_in / SF_out). ~identity when calib gives equal scales
+  // (ReLU preserves the positive range). See docs/ONNC_INT8_PLAN.md Part E.
+  if (DLA_PRECISION == PRECISION_INT8) {
+    const float sfIn  = getActivationScale(input_X_t->getName());
+    const float sfOut = getActivationScale(output_Y_t->getName());
+    if (sfIn > 0.0f && sfOut > 0.0f) {
+      const internal::CvtParams cvt = internal::realToCvt(static_cast<double>(sfIn) / static_cast<double>(sfOut));
+      relu_desc->out_cvt.scale      = cvt.scale;
+      relu_desc->out_cvt.truncate   = cvt.truncate;
+      outs() << "[NvDla][int8] relu " << output_Y_t->getName() << " : SF_in=" << sfIn << " SF_out=" << sfOut
+             << " out_cvt.scale=" << cvt.scale << " truncate=" << static_cast<int>(cvt.truncate) << "\n";
+    }
+  }
   relu_desc->conv_mode                  = CONV_MODE_DIRECT;
   relu_desc->batch_num                  = 1;
   relu_desc->batch_stride               = 0;

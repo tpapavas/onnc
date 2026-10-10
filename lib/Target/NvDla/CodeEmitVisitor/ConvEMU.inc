@@ -23,6 +23,70 @@ PP_DEFINE_VISIT(Conv, pOp)
   NvDlaCubeInfo Y_cube(*this, NVDLA_CUBE_FEATURE, output_Y_dims[0], output_Y_dims[1], output_Y_dims[2],
                        output_Y_dims[3]);
 
+  // INT8 requantization. Build the per-output-channel rescale
+  //   R[k] = SF_in * SF_wt[k] / SF_out
+  // and decompose it into NVDLA's (shared shift, per-channel int16 multiplier)
+  // form. The multipliers are applied as the SDP per-kernel MUL operand
+  // (packRequantMul) and the shift as the SDP X1 truncate. This mirrors
+  // nvdla_compiler exactly (verified against nvdla/sw, see docs/ONNC_INT8_PLAN.md
+  // Part D): the conv does NO pre-shift -- it hands the int32 accumulator to the
+  // SDP (ConvCoreNode.cpp: setOutTruncate(0)/setPraTruncate(0)) -- and the whole
+  // shared shift lives in the SDP X1 stage (ScaleOp.cpp: x1Params().setTruncate).
+  bool                      int8Requant = false;
+  std::vector<std::int16_t> requantMult;     // per output channel, m[k] (int16) -> SDP X1 MUL
+  std::vector<std::int16_t> requantBias;     // per output channel, round(b[k]/SF_out) (int16) -> SDP X2 ADD
+  int                       sdpShift    = 0;  // SDP x1_op.truncate (full shared shift, UINT5)
+  if (DLA_PRECISION == PRECISION_INT8) {
+    const float sfIn  = getActivationScale(input_X_t->getName());
+    // Resolve across a trailing scale-preserving reshape so the gemm->conv final
+    // layer (output `replace_gemm_by_conv_N`, reshaped to the calibrated graph
+    // output) gets its real SF_out instead of 0 -> identity -> int8 saturation.
+    const float sfOut = getActivationScaleResolved(output_Y_t);
+
+    const std::vector<float>* wtScales = getWeightScales(input_W_t);
+    if (wtScales == nullptr) {
+      if (const FloatTensor* const wft = dynamic_cast<const FloatTensor*>(input_W_t)) {
+        computeWeightScales(input_W_t, wft->getValues(), NvDlaDims(*input_W_t));
+        wtScales = getWeightScales(input_W_t);
+      }
+    }
+
+    if (sfIn > 0.0f && sfOut > 0.0f && wtScales != nullptr && !wtScales->empty()) {
+      std::vector<double> ratios(wtScales->size());
+      for (std::size_t k = 0; k < wtScales->size(); ++k) {
+        ratios[k] = static_cast<double>(sfIn) * (*wtScales)[k] / static_cast<double>(sfOut);
+      }
+      const internal::PerChannelCvt pc = internal::realToPerChannelCvt(ratios);
+
+      int8Requant = true;
+      requantMult = pc.mult;
+      sdpShift    = static_cast<int>(pc.truncate); // full shift -> SDP X1 (no conv pre-shift)
+
+      // Per-channel bias in the OUTPUT (SF_out) domain, added in SDP X2 after the
+      // X1 rescale: bias_out[k] = round(b_fp32[k] / SF_out), int16. Matches
+      // nvdla_compiler's fused Scale(X1)+Bias(X2) (BatchNormOp.cpp): the bias adds
+      // in the post-rescale (output) domain. See docs/ONNC_INT8_PLAN.md B.6.
+      if (pOp.hasBias()) {
+        if (const FloatTensor* const bft = dynamic_cast<const FloatTensor*>(input_B_t)) {
+          const auto biasVals = bft->getValues();
+          requantBias.resize(biasVals.size());
+          for (std::size_t k = 0; k < biasVals.size(); ++k) {
+            double q = std::round(static_cast<double>(biasVals[k]) / static_cast<double>(sfOut));
+            q       = std::max(-32768.0, std::min(32767.0, q));
+            requantBias[k] = static_cast<std::int16_t>(q);
+          }
+        }
+      }
+
+      outs() << "[NvDla][int8] requant " << output_Y_t->getName() << " : SF_in=" << sfIn << " SF_out=" << sfOut
+             << " ch=" << ratios.size() << " x1_truncate=" << sdpShift
+             << " bias=" << (requantBias.empty() ? "no" : "int16/out-domain") << "\n";
+    } else {
+      outs() << "[NvDla][int8] requant " << output_Y_t->getName() << " : missing scales -> identity (SF_in=" << sfIn
+             << " SF_out=" << sfOut << " have_wt=" << (wtScales != nullptr) << ")\n";
+    }
+  }
+
   // Prepare attributes
   int32_t number_of_dilations = pOp.getDilations().vector().size();
   int32_t dilations[2]        = {1, 1};
@@ -76,10 +140,32 @@ PP_DEFINE_VISIT(Conv, pOp)
 
     NvDlaCubeInfo B_info(*this, NVDLA_CUBE_FEATURE, numOutputChannelsPerGroup, 1, 1, 1);
 
-    if (pOp.hasBias()) {
+    // FP16 / non-requant path uses the fp16 bias here; INT8 requant uses the
+    // int16 output-domain bias (Bq) packed below, so skip this zero blob then.
+    if (pOp.hasBias() && !int8Requant) {
       B_mid  = packBias(*input_B_t, numOutputChannelsPerGroup, outputChannelOffset);
       // B_addr = issueDlaAddr(B_mid, B_info);
       B_addr = issueEmuAddr(B_mid);
+    }
+
+    // INT8: emit this group's per-kernel requant multipliers as a 2-byte SDP
+    // operand cube (consumed by the bias-add SDP's x1 MUL stage below).
+    int           M_mid  = -1;
+    int           M_addr = -1;
+    NvDlaCubeInfo M_info(*this, NVDLA_CUBE_SDP_X_ALU_OR_MUL_TWO_BYTE, 1, numOutputChannelsPerGroup, 1, 1);
+    if (int8Requant) {
+      M_mid  = packRequantMul(requantMult, numOutputChannelsPerGroup, outputChannelOffset);
+      // M_addr = issueDlaAddr(M_mid, M_info);
+      M_addr = issueEmuAddr(M_mid);
+    }
+
+    // INT8: this group's per-kernel int16 bias (output domain) for the SDP X2 ADD.
+    int Bq_mid  = -1;
+    int Bq_addr = -1;
+    if (int8Requant && pOp.hasBias() && !requantBias.empty()) {
+      Bq_mid  = packRequantMul(requantBias, numOutputChannelsPerGroup, outputChannelOffset);
+      // Bq_addr = issueDlaAddr(Bq_mid, M_info);
+      Bq_addr = issueEmuAddr(Bq_mid);
     }
 
     int pad_top       = pads[0];
@@ -202,20 +288,36 @@ PP_DEFINE_VISIT(Conv, pOp)
       conv_desc->dilation_x         = dilations[1];
       conv_desc->dilation_y         = dilations[0];
       conv_desc->pra_truncate       = 0;
-      conv_desc->in_precision       = DLA_PRECISION;
+      // conv_desc->in_precision       = DLA_PRECISION;
+      /**
+       * Temporary solution.
+       * Attempt to map dla_interface precision consts
+       * to emu_interface ones.
+       */
+      conv_desc->in_precision       = DLA_PRECISION + 1;
       conv_desc->out_precision      = DLA_PRECISION;
       conv_desc->out_cvt_scale      = 1;
+      // No conv pre-shift: the conv hands the int32 accumulator to the SDP and the
+      // whole rescale (per-channel MUL + shift) happens there -- matching
+      // nvdla_compiler (ConvCoreNode.cpp sets out/pra truncate to 0).
+      conv_desc->out_cvt_truncate   = 0;
       conv_desc->out_cvt_enable     = 1;
       conv_desc->pad_val            = 0;
 
       conv_desc->has_relu           = pOp.hasRelu() ? 1 : 0;
+      // conv_desc->relu_op_cvt_scale  = pOp.hasRelu() && int8Requant  ? (int16_t) pOp.getReluScale().value() : 0;
+      // conv_desc->relu_op_cvt_truncate = pOp.hasRelu() && int8Requant ? (int16_t) pOp.getReluTruncate().value() : 0;
+
+      NvU16 emuFormat = EMU_FORMAT_FF16;
+      if (DLA_PRECISION == PRECISION_INT8)
+        emuFormat = (FEATURE_ATOM_CUBE_SIZE == 8) ? EMU_FORMAT_INT8_8 : EMU_FORMAT_INT8;
 
       struct emu_conv_buffer_descs* conv_surf = (struct emu_conv_buffer_descs*)(&(conv_op->op_buf));
       // conv_surf->weight_data.type             = DLA_MEM_MC;
       // conv_surf->weight_data.address          = W_addr;
       conv_surf->weight_data.addressIndex     = W_addr;
       conv_surf->weight_data.size             = m_pMeta.getMemoryListEntrySize(W_mid);
-      conv_surf->weight_data.format           = 3; // fp16
+      conv_surf->weight_data.format           = emuFormat; // 3: fp16
       conv_surf->weight_data.width            = winfo.dim_w;
       conv_surf->weight_data.height           = winfo.dim_h;
       conv_surf->weight_data.channel          = winfo.dim_c;
@@ -270,13 +372,63 @@ PP_DEFINE_VISIT(Conv, pOp)
       add_desc->lut_index              = -1;
       add_desc->conv_mode              = 0;
       add_desc->out_cvt.scale          = 1;
+      // INT8: the SDP out_cvt stays identity; the residual shift S lives in the X1
+      // stage (x1_op.truncate) so it is applied right after the per-kernel MUL and
+      // BEFORE the X2 bias add (which is therefore in the SF_out domain) -- this is
+      // how nvdla_compiler programs the per-kernel scale (x1Params().setTruncate).
       add_desc->out_cvt.truncate       = 0;
       add_desc->out_cvt.enable         = 1;
       add_desc->out_cvt.offset         = 0;
       add_desc->conv_mode              = CONV_MODE_DIRECT;
       add_desc->batch_num              = 1;
       add_desc->batch_stride           = 0;
-      if (pOp.hasBias()) {
+      if (int8Requant) {
+        // x1 = per-kernel MUL: apply the per-channel requant multipliers m[k]
+        // (int16 operand cube). x2 = per-kernel ALU SUM: the bias (zero until the
+        // int8-bias patch). Order conv -> MUL(rescale) -> ADD(bias) -> out_cvt.
+        add_desc->x1_op.enable               = 1;
+        add_desc->x1_op.alu_type             = SDP_ALU_OP_SUM;
+        add_desc->x1_op.type                 = SDP_OP_MUL;
+        add_desc->x1_op.mode                 = SDP_OP_PER_KERNEL;
+        add_desc->x1_op.act                  = ACTIVATION_NONE;
+        add_desc->x1_op.shift_value          = 0;
+        add_desc->x1_op.truncate             = static_cast<std::uint8_t>(sdpShift); // full shared shift (UINT5)
+        add_desc->x1_op.precision            = PRECISION_INT16; // 2-byte per-kernel operand
+        add_desc->x1_op.alu_operand          = 0;
+        add_desc->x1_op.mul_operand          = 1;
+        add_desc->x1_op.cvt.alu_cvt.scale    = 0;
+        add_desc->x1_op.cvt.alu_cvt.truncate = 0;
+        add_desc->x1_op.cvt.alu_cvt.enable   = 0;
+        add_desc->x1_op.cvt.alu_cvt.offset   = 0;
+        add_desc->x1_op.cvt.mul_cvt.scale    = 1;
+        add_desc->x1_op.cvt.mul_cvt.truncate = 0;
+        add_desc->x1_op.cvt.mul_cvt.enable   = 0;
+        add_desc->x1_op.cvt.mul_cvt.offset   = 0;
+
+        if (pOp.hasBias()) {
+          add_desc->x2_op.enable               = 1;
+          add_desc->x2_op.alu_type             = SDP_ALU_OP_SUM;
+          add_desc->x2_op.type                 = SDP_OP_ALU;
+          add_desc->x2_op.mode                 = SDP_OP_PER_KERNEL;
+          add_desc->x2_op.act                  = ACTIVATION_NONE;
+          add_desc->x2_op.shift_value          = 0;
+          add_desc->x2_op.truncate             = 0;
+          add_desc->x2_op.precision            = PRECISION_INT16; // int16 per-kernel bias operand
+          add_desc->x2_op.alu_operand          = 0;
+          add_desc->x2_op.mul_operand          = 0;
+          add_desc->x2_op.cvt.alu_cvt.scale    = 0;
+          add_desc->x2_op.cvt.alu_cvt.truncate = 0;
+          add_desc->x2_op.cvt.alu_cvt.enable   = 0;
+          add_desc->x2_op.cvt.alu_cvt.offset   = 0;
+          add_desc->x2_op.cvt.mul_cvt.scale    = 0;
+          add_desc->x2_op.cvt.mul_cvt.truncate = 0;
+          add_desc->x2_op.cvt.mul_cvt.enable   = 0;
+          add_desc->x2_op.cvt.mul_cvt.offset   = 0;
+        } else {
+          add_desc->x2_op.enable = 0;
+        }
+        add_desc->y_op.enable = 0;
+      } else if (pOp.hasBias()) {
         add_desc->x1_op.enable               = 1;
         add_desc->x1_op.alu_type             = SDP_ALU_OP_SUM;
         add_desc->x1_op.type                 = SDP_OP_ALU;
@@ -295,12 +447,15 @@ PP_DEFINE_VISIT(Conv, pOp)
         add_desc->x1_op.cvt.mul_cvt.truncate = 0;
         add_desc->x1_op.cvt.mul_cvt.enable   = 0;
         add_desc->x1_op.cvt.mul_cvt.offset   = 0;
+        add_desc->x2_op.enable = 0;
+        add_desc->y_op.enable  = 0;
       } else {
         add_desc->x1_op.enable = 0;
+        add_desc->x2_op.enable = 0;
+        add_desc->y_op.enable  = 0;
       }
 
-      add_desc->x2_op.enable = 0;
-      add_desc->y_op.enable  = 0;
+
       */
 
       conv_desc->src_precision          = DLA_PRECISION;
@@ -348,7 +503,58 @@ PP_DEFINE_VISIT(Conv, pOp)
       // add_surf->src_data.surf_stride        = 0;
       // add_surf->src_data.plane_stride       = 0;
 
-      if (pOp.hasBias()) {
+      if (int8Requant) {
+        // x1 <- per-kernel requant multipliers (int16 cube); x2 <- bias.
+        // add_surf->x1_data.type         = DLA_MEM_MC;
+        // add_surf->x1_data.address      = M_addr;
+        // add_surf->x1_data.size         = m_pMeta.getMemoryListEntrySize(M_mid);
+        // add_surf->x1_data.width        = 1;
+        // add_surf->x1_data.height       = 1;
+        // add_surf->x1_data.channel      = numOutputChannelsPerGroup;
+        // add_surf->x1_data.line_stride  = M_info.stride_line;
+        // add_surf->x1_data.surf_stride  = M_info.stride_surface;
+        // add_surf->x1_data.plane_stride = M_info.stride_plane;
+
+        /**
+         * NOTE: Hacky solution.
+         * x1_op_truncate is originally for bias (x1) scale.
+         * As we don't use x1 in ConvEMU we can utilize it
+         * for conv requantization.
+         */
+        conv_desc->x1_op_truncate            = static_cast<std::uint8_t>(sdpShift); // full shared shift (UINT5)
+
+        conv_surf->requant_data.addressIndex = M_addr;
+        conv_surf->requant_data.size         = m_pMeta.getMemoryListEntrySize(M_mid);
+        conv_surf->requant_data.format       = 3; // fp16
+        conv_surf->requant_data.width        = 1;
+        conv_surf->requant_data.height       = 1;
+        conv_surf->requant_data.channel      = numOutputChannelsPerGroup;
+        conv_surf->requant_data.line_stride  = M_info.stride_line;
+        conv_surf->requant_data.surf_stride  = M_info.stride_surface;
+        conv_surf->requant_data.plane_stride = M_info.stride_plane;
+        if (pOp.hasBias()) {
+          // add_surf->x2_data.type         = DLA_MEM_MC;
+          // add_surf->x2_data.address      = Bq_addr; // int16 output-domain bias cube
+          // add_surf->x2_data.size         = m_pMeta.getMemoryListEntrySize(Bq_mid);
+          // add_surf->x2_data.width        = 1;
+          // add_surf->x2_data.height       = 1;
+          // add_surf->x2_data.channel      = numOutputChannelsPerGroup;
+          // add_surf->x2_data.line_stride  = M_info.stride_line;
+          // add_surf->x2_data.surf_stride  = M_info.stride_surface;
+          // add_surf->x2_data.plane_stride = M_info.stride_plane;
+
+          conv_surf->bias_data.addressIndex = Bq_addr; // int16 output-domain bias cube
+          conv_surf->bias_data.size         = m_pMeta.getMemoryListEntrySize(Bq_mid);
+          conv_surf->bias_data.format       = 3; // fp16
+          conv_surf->bias_data.width        = 1;
+          conv_surf->bias_data.height       = 1;
+          conv_surf->bias_data.channel      = numOutputChannelsPerGroup;
+          conv_surf->bias_data.line_stride  = M_info.stride_line;
+          conv_surf->bias_data.surf_stride  = M_info.stride_surface;
+          // conv_surf->bias_data.plane_stride = M_info.stride_plane;
+        }
+      } else if (pOp.hasBias()) {
+      // if (pOp.hasBias()) {
         // add_surf->x1_data.type         = DLA_MEM_MC;
         // add_surf->x1_data.address      = B_addr;
         // add_surf->x1_data.size         = m_pMeta.getMemoryListEntrySize(B_mid);

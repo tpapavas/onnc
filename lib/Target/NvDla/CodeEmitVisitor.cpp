@@ -1132,7 +1132,7 @@ void CodeEmitVisitor::emitEmuSdp(const ComputeOperator& op, const Tensor& first,
 
   // make sure the 'first' tensor is always non-constant
   if (isConstant(first)) {
-    emitSdp(op, second, first, output);
+    emitEmuSdp(op, second, first, output);
     return;
   }
 
@@ -1152,7 +1152,13 @@ void CodeEmitVisitor::emitEmuSdp(const ComputeOperator& op, const Tensor& first,
   common.op_type          = NVDLA_EMU_OP_SDP;
   desc->common            = common;
 
-  desc->src_precision     = 3; // DLA_PRECISION = 2 but EMU_FORMAT_FF16 = 3
+  // desc->src_precision     = 3; // DLA_PRECISION = 2 but EMU_FORMAT_FF16 = 3
+  /**
+   * Temporary solution.
+   * Attempt to map dla_interface precision consts
+   * to emu_interface ones.
+   */
+  desc->src_precision     = DLA_PRECISION + 1;
   desc->dst_precision     = 3; // DLA_PRECISION = 2 but EMU_FORMAT_FF16 = 3
   desc->lut_index         = -1;
   desc->out_cvt.scale     = 1;
@@ -1185,6 +1191,62 @@ void CodeEmitVisitor::emitEmuSdp(const ComputeOperator& op, const Tensor& first,
       break;
     default:
       assert(false && "should not reach here");
+    }
+  }
+
+  // INT8 requant for the eltwise SDP ops (Add/Mul/Max/Min). The fp16 path above
+  // left out_cvt=1 (and fp16 operands); for int8 we recompute the converters from
+  // the calibrated scales so the op lands in the output scale SF_out. This matches
+  // nvdla_compiler's SDPEltWiseOp::performPerTensorRescaling, which programs ONLY a
+  // single out_cvt and has NO per-operand converter -- it requires the two inputs
+  // to already share one scale (it asserts equal input scales). We make that hold
+  // by enforcing equal scales on additive-eltwise inputs in 05b (like Concat), so:
+  //   Add/Max/Min, two features : inputs share SF_in -> out_cvt = realToCvt(SF_in/SF_out)
+  //       (no operand cvt -- exactly nvdla's form; resolves the old X1-cvt assumption).
+  //   Mul, two features         : a true multiply lets the scales multiply, so no
+  //       enforced equality -> out_cvt = realToCvt(SF_a*SF_b/SF_out), no operand cvt.
+  //   const operand (LAYER)     : the scalar c is quantized to the input scale --
+  //       Add/Max/Min -> alu_operand = round(c/SF_a), out_cvt = realToCvt(SF_a/SF_out)
+  //                      (e.g. Clip->Max(0)/Min(6) for ReLU6);
+  //       Mul         -> mul_operand = 1,             out_cvt = realToCvt(c*SF_a/SF_out).
+  // See docs/ONNC_INT8_PLAN.md Part D (nvdla source) + Part E.
+  if (DLA_PRECISION == PRECISION_INT8) {
+    outs() << "[DEBUG] sfA from tensor " << first.getName() << "\n";
+    outs() << "[DEBUG] sfOut from tensor " << output.getName() << "\n";
+    const float sfA   = getActivationScale(first.getName());
+    const float sfOut = getActivationScale(output.getName());
+    if (sfA > 0.0f && sfOut > 0.0f) {
+      internal::CvtParams outCvt{1, 0};
+      bool                handled = true;
+      if (category == BroadcastCategory::LAYER) {
+        const float c = to_<std::vector<float>>(second).front();
+        if (isa<Mul>(&op)) {
+          desc->x1_op.mul_operand = 1;
+          outCvt = internal::realToCvt(static_cast<double>(c) * sfA / sfOut);
+        } else {
+          desc->x1_op.alu_operand = static_cast<int32_t>(std::lround(static_cast<double>(c) / sfA));
+          outCvt                 = internal::realToCvt(static_cast<double>(sfA) / sfOut);
+        }
+      } else {
+        const float sfB = getActivationScale(second.getName());
+        outs() << "[DEBUG] sfB from tensor " << second.getName() << "\n";
+        handled         = (sfB > 0.0f);
+        if (handled && isa<Mul>(&op)) {
+          outCvt = internal::realToCvt(static_cast<double>(sfA) * sfB / sfOut);
+        } else if (handled) {
+          // Add/Max/Min: inputs are enforced to one scale upstream (05b), so a
+          // single out_cvt suffices -- no per-operand X1 converter (matches nvdla).
+          outCvt = internal::realToCvt(static_cast<double>(sfA) / sfOut);
+        }
+      }
+      if (handled) {
+        desc->out_cvt.scale    = outCvt.scale;
+        desc->out_cvt.truncate = outCvt.truncate;
+        const char* kind = isa<Mul>(&op) ? "mul" : (isa<Max>(&op) ? "max" : (isa<Min>(&op) ? "min" : "add"));
+        outs() << "[NvDla][int8] eltwise-" << kind << " " << output.getName() << " : SF_a=" << sfA
+               << " SF_out=" << sfOut << (category == BroadcastCategory::LAYER ? " const" : "")
+               << " out_cvt=" << outCvt.scale << "/" << static_cast<int>(outCvt.truncate) << "\n";
+      }
     }
   }
 

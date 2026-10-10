@@ -72,7 +72,13 @@ PP_DEFINE_VISIT(AveragePool, pOp)
   avgpool_desc->pad_bottom             = pad_shapes[2];
   avgpool_desc->pad_right              = pad_shapes[3];
 
-  avgpool_desc->precision = 3; // DLA_PRECISION;
+  // avgpool_desc->precision = 3; // DLA_PRECISION;
+  /**
+   * Temporary solution.
+   * Attempt to map dla_interface precision consts
+   * to emu_interface ones.
+   */
+  avgpool_desc->precision = DLA_PRECISION + 1;
 
   // struct dla_pdp_surface_desc* avgpool_surf = (struct dla_pdp_surface_desc*)(&(avgpool_op->op_surf));
   struct emu_pool_buffer_descs* avgpool_surf = (struct emu_pool_buffer_descs*)(&(avgpool_op->op_buf));
