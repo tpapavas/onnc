@@ -173,7 +173,7 @@ onnc::NvDlaEmuOperation* genmem::rubik_register_to_emu(onnc::NvDlaBackendMeta& m
   op_desc->common = common;
 
   op_desc->mode      = reg.rubik_mode;
-  op_desc->precision = 3; // EMU_FORMAT_FF16 (original: reg.in_precison)
+  op_desc->precision = reg.in_precison;
   op_desc->stride_x  = reg.deconv_x_stride;
   op_desc->stride_y  = reg.deconv_y_stride;
 
