@@ -181,6 +181,8 @@ BroadcastCategory getBroadcastCategory(const Tensor& fromTensor, const Tensor& t
   } break;
   case 1:
     return (fromDims[0] == 1 ? BroadcastCategory::LAYER : BroadcastCategory::UNSUPPORT);
+  case 0:
+    return BroadcastCategory::LAYER;
   default:
     return BroadcastCategory::UNSUPPORT;
   }
@@ -1274,7 +1276,7 @@ void CodeEmitVisitor::emitEmuSdp(const ComputeOperator& op, const Tensor& first,
   if (category == BroadcastCategory::LAYER) {
     // NvDlaDataCubeModifier(surface->x1_data, NvDlaMemType::hw).setAddress(-1);
     // surface->src_data.type         = static_cast<std::underlying_type<NvDlaMemType>::type>(NvDlaMemType::hw);
-    surface->src_data.addressIndex = -1;
+    surface->x1_data.addressIndex = -1;
   } else {
     MemoryListEntryId   memoryId;
     const NvDlaCubeInfo secondCubeInfo = makeCubeInfo(*this, getSdpXSingleCubeType(second, DLA_PRECISION), second);
