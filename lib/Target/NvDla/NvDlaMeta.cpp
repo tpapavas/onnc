@@ -429,7 +429,7 @@ NvDlaCubeInfo::NvDlaCubeInfo(const NvDlaConstants& constants, nvdla_cube_type m,
   switch (mode) {
   case NVDLA_CUBE_FEATURE:
     stride_channel = ELEMENT_SIZE;
-    stride_line    = UNIT_ALIGNMENT(dim_w * FEATURE_ATOM_CUBE_SIZE, 32);
+    stride_line    = UNIT_ALIGNMENT(dim_w * FEATURE_ATOM_CUBE_SIZE, FEATURE_ATOM_CUBE_SIZE); //32);
     stride_surface = stride_line * dim_h;
     stride_plane   = 0;
     {
@@ -439,19 +439,30 @@ NvDlaCubeInfo::NvDlaCubeInfo(const NvDlaConstants& constants, nvdla_cube_type m,
       size = stride_surface * num_surf;
 
       // copy how SystemC calculate entry per slice
+      const int atom_per_cbuf_entry = CBUF_BANK_WIDTH / FEATURE_ATOM_CUBE_SIZE;
       int atom_per_channel = DIV_ROUNDUP((dim_c * ELEMENT_SIZE), FEATURE_ATOM_CUBE_SIZE);
 
       int entry_per_slice;
       //  This calculation is for nv_full and not general for any hardware configuration.
-      entry_per_slice = (atom_per_channel / 4) * dim_w;
+      // entry_per_slice = (atom_per_channel / 4) * dim_w;
+      entry_per_slice = (atom_per_channel / atom_per_cbuf_entry) * dim_w;
 
       // Same check as in IP_TOT/tools/cc_sanity_checker.pl (line350~357)
-      if ((atom_per_channel % 4) == 3)
-        entry_per_slice += dim_w;
-      else if ((atom_per_channel % 4) == 2)
-        entry_per_slice += (dim_w + 1) / 2;
-      else if ((atom_per_channel % 4) == 1)
-        entry_per_slice += (dim_w + 3) / 4;
+      // if ((atom_per_channel % 4) == 3)
+      //   entry_per_slice += dim_w;
+      // else if ((atom_per_channel % 4) == 2)
+      //   entry_per_slice += (dim_w + 1) / 2;
+      // else if ((atom_per_channel % 4) == 1)
+      //   entry_per_slice += (dim_w + 3) / 4;
+      const int cripple_atom_num = atom_per_channel % atom_per_cbuf_entry;
+      if (cripple_atom_num) {
+        if (cripple_atom_num > atom_per_cbuf_entry / 2)
+          entry_per_slice += dim_w;
+        else if (cripple_atom_num == atom_per_cbuf_entry / 2)
+          entry_per_slice += (dim_w + 1) / 2;
+        else if (cripple_atom_num == atom_per_cbuf_entry / 4)
+          entry_per_slice += (dim_w + 3) / 4;
+      }
 
       eps = entry_per_slice;
     }

@@ -20,6 +20,7 @@ enum class ConfigSet : unsigned
 {
   nv_full      = 0,
   nv_full_int8 = 1, // INT8 precision variant of nv_full (same RTL geometry)
+  nv_small     = 2, // nv_small (INT8 precision only)
 };
 
 enum class ExecutionMode : unsigned

@@ -104,6 +104,10 @@ const Version NvDlaBackend::BLOB_EMU_VERSION = Version(1, 2, 0);
 static nvdla::ConfigSet selectConfigSet()
 {
   const char* const precision = std::getenv("ONNC_NVDLA_PRECISION");
+  const char* const arch = std::getenv("ONNC_NVDLA_ARCH");
+  if (arch != nullptr && std::string(arch) == "nv_small") {
+    return nvdla::ConfigSet::nv_small;
+  }
   if (precision != nullptr && std::string(precision) == "int8") {
     return nvdla::ConfigSet::nv_full_int8;
   }
