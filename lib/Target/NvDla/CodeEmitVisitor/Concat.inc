@@ -1,5 +1,14 @@
 PP_DEFINE_VISIT(Concat, pOp)
 {
+    NvDlaBackendMeta::OpEngineMapper::Category engine_category =
+        m_pMeta.m_OpEngineMapper.getAndSetOpEngine(m_pMeta.m_OpEngineMapper,
+                                                    NvDlaBackendMeta::OpEngineMapper::NvDlaOpType::rubik);
+    outs() << "[MAPPING] op engine: " << static_cast<std::underlying_type<NvDlaBackendMeta::OpEngineMapper::Category>::type>(engine_category) << "\n";
+    if (engine_category == NvDlaBackendMeta::OpEngineMapper::Category::emu) {
+        PP_CALL_VISIT_CPU(pOp);
+
+        return;
+    }
         // Prepare attributes
         int axis = pOp.getAxis().value();
         int input_tensor_num = pOp.getNumOfInputs();

@@ -11,6 +11,8 @@
 #include <onnc/Support/IOStream.h>
 #include <onnc/Option/CommandLine.h>
 #include <onnc/Config/AboutData.h>
+#include <algorithm>
+#include <iterator>
 
 using namespace onnc;
 
@@ -63,6 +65,12 @@ static cl::opt<std::string> OptQuadruple("mquadruple", cl::kShort, cl::kOptional
     
 static cl::opt<std::string> OptMArch("march", cl::kShort, cl::kOptional,
     cl::kValueRequired, cl::desc("target architecture"), cl::about(g_About));
+
+static cl::opt<std::string> OptOpMapper("op-mapper", cl::kLong, cl::kOptional,
+    cl::kValueRequired,
+    cl::desc("engine mapping method for ops (dla_only, cpu_only, ping_pong)"),
+    cl::init("dla_only"),
+    cl::about(g_About));
 
 //===----------------------------------------------------------------------===//
 // Main Procedure
@@ -118,6 +126,16 @@ int main(int pArgc, char* pArgv[])
     if (OptMArch.hasOccurrence())
       onnc.options().setArchName(OptMArch);
   }
+
+  std::vector<std::string> availableOpMappers{"dla_only", "cpu_only", "ping_pong"};
+  if (std::find(std::begin(availableOpMappers), std::end(availableOpMappers), OptOpMapper.getValue()) == std::end(availableOpMappers)) {
+    errs() << Color::MAGENTA << "Fatal" << Color::RESET
+           << ": op mapper value "
+           << Color::CYAN << OptOpMapper.getValue() << Color::RESET
+           << " is incorrect (available options: dla_only, cpu_only, ping_pong)." << std::endl;
+    return EXIT_FAILURE;
+  }
+  onnc.options().setOpMapper(OptOpMapper);
 
   return onnc.compile();
 }

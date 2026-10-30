@@ -135,8 +135,51 @@ public:
     Category category;
   };
 
+  class OpEngineMapper
+  {
+  public:
+    enum class NvDlaOpType : std::uint8_t
+    {
+      bdma  = DLA_OP_BDMA,
+      conv  = DLA_OP_CONV,
+      sdp   = DLA_OP_SDP,
+      pdp   = DLA_OP_PDP,
+      cdp   = DLA_OP_CDP,
+      rubik = DLA_OP_RUBIK,
+    };
+
+    enum class Category : unsigned
+    {
+      none, dla, emu
+    };
+
+    enum class MappingMethod : unsigned
+    {
+      undef, dla_only, cpu_only, ping_pong
+    };
+
+    explicit OpEngineMapper(MappingMethod method = MappingMethod::ping_pong)
+      : mapping_method{method}
+    {}
+
+    void setMappingMethod(const std::string& mappingMethod);
+    MappingMethod getMappingMethod() const noexcept { return mapping_method; }
+
+    Category (*getAndSetOpEngine)(OpEngineMapper& opMapper, const NvDlaOpType& thisOpType);
+
+    static Category getAndSetOpEngineDlaOnly(OpEngineMapper& opMapper, const NvDlaOpType& thisOpType);
+    static Category getAndSetOpEngineCpuOnly(OpEngineMapper& opMapper, const NvDlaOpType& thisOpType);
+    static Category getAndSetOpEnginePingPong(OpEngineMapper& opMapper, const NvDlaOpType& thisOpType);
+  private:
+    Category current_engine = Category::emu;
+
+    MappingMethod mapping_method = MappingMethod::dla_only;
+  };
+
 public:
-  explicit NvDlaBackendMeta(const NvDlaConstants& constants);
+  explicit NvDlaBackendMeta(
+      const NvDlaConstants& constants,
+      const std::string& method = "dla_only");
 
   ~NvDlaBackendMeta();
 
@@ -200,6 +243,8 @@ public:
 
   emu_network_desc                m_EmuNetworkDesc;
   std::vector<NvDlaEmuOperation*> m_EMUOperationList;
+
+  OpEngineMapper                  m_OpEngineMapper;
 
 private:
   bool hasAddressListEntry(MemoryListEntryId memoryId, Offset offset) const;

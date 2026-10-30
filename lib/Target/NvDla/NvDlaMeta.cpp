@@ -62,7 +62,7 @@ NvDlaEmuOperation::NvDlaEmuOperation() noexcept
 //===----------------------------------------------------------------------===//
 // NvDlaBackendMeta
 //===----------------------------------------------------------------------===//
-NvDlaBackendMeta::NvDlaBackendMeta(const NvDlaConstants& constants)
+NvDlaBackendMeta::NvDlaBackendMeta(const NvDlaConstants& constants, const std::string& mapping_method)
   : NvDlaConstants{constants}
   , m_DlaNetworkDesc{}
   , m_NumLUTs{0}
@@ -81,6 +81,23 @@ NvDlaBackendMeta::NvDlaBackendMeta(const NvDlaConstants& constants)
 
   for (std::size_t idx = 0; idx < internal::size(m_DlaNetworkDesc.op_head); ++idx) {
     m_DlaNetworkDesc.op_head[idx] = -1;
+  }
+
+  m_OpEngineMapper.setMappingMethod(mapping_method);
+
+  using MappingMethod = OpEngineMapper::MappingMethod;
+  switch (m_OpEngineMapper.getMappingMethod()) {
+  case MappingMethod::dla_only:
+    m_OpEngineMapper.getAndSetOpEngine = OpEngineMapper::getAndSetOpEngineDlaOnly;
+    break;
+  case MappingMethod::cpu_only:
+    m_OpEngineMapper.getAndSetOpEngine = OpEngineMapper::getAndSetOpEngineCpuOnly;
+    break;
+  case MappingMethod::ping_pong:
+  case MappingMethod::undef:
+  default:
+    m_OpEngineMapper.getAndSetOpEngine = OpEngineMapper::getAndSetOpEnginePingPong;
+    break;
   }
 }
 
@@ -412,6 +429,45 @@ AddressListEntryId NvDlaBackendMeta::getAddressListEntryId(MemoryListEntryId mem
 
   const auto& offsetList = memoryOffsetListPair->second;
   return offsetList.find(offset)->second;
+}
+
+void
+NvDlaBackendMeta::OpEngineMapper::setMappingMethod(const std::string& mappingMethod)
+{
+    if (mappingMethod == "dla_only") {
+        mapping_method = MappingMethod::dla_only;
+    } else if (mappingMethod == "cpu_only") {
+        mapping_method = MappingMethod::cpu_only;
+    } else if (mappingMethod == "ping_pong") {
+        mapping_method = MappingMethod::ping_pong;
+    } else {
+        mapping_method = MappingMethod::undef;
+    }
+}
+
+NvDlaBackendMeta::OpEngineMapper::Category NvDlaBackendMeta::OpEngineMapper::getAndSetOpEngineDlaOnly(
+    OpEngineMapper& opMapper, const NvDlaOpType& thisOpType)
+{
+  (void)thisOpType;
+  opMapper.current_engine = Category::dla;
+  return opMapper.current_engine;
+}
+
+NvDlaBackendMeta::OpEngineMapper::Category NvDlaBackendMeta::OpEngineMapper::getAndSetOpEngineCpuOnly(
+    OpEngineMapper& opMapper, const NvDlaOpType& thisOpType)
+{
+  (void)thisOpType;
+  opMapper.current_engine = Category::emu;
+  return opMapper.current_engine;
+}
+
+NvDlaBackendMeta::OpEngineMapper::Category NvDlaBackendMeta::OpEngineMapper::getAndSetOpEnginePingPong(
+    OpEngineMapper& opMapper, const NvDlaOpType& thisOpType)
+{
+  if (thisOpType == NvDlaOpType::conv) {
+    opMapper.current_engine = (opMapper.current_engine == Category::dla) ? Category::emu : Category::dla;
+  }
+  return opMapper.current_engine;
 }
 
 //===----------------------------------------------------------------------===//

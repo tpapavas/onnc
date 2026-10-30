@@ -35,7 +35,8 @@
 
 #define PP_DECL_VISIT(type)         \
   void visit(const type&) override; \
-  void visitImpl(const type&);
+  void visitImpl(const type&);      \
+  void visitImplCPU(const type&);
 
 namespace onnc {
 namespace nvdla {

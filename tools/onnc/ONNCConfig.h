@@ -59,6 +59,8 @@ public:
 
   unsigned int verbose() const { return m_TargetOptions.getVerboseLevel(); }
 
+  void setOpMapper(const std::string& opMapper) { m_TargetOptions.setOpMapper(opMapper); }
+
 private:
   onnc::Path m_Input;
   onnc::Path m_Output;

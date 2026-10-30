@@ -85,6 +85,12 @@
   }                                                                               \
   void CodeEmitVisitor::visitImpl(const type& op)
 
+#define PP_DEFINE_VISIT_CPU(type, op)                                             \
+  void CodeEmitVisitor::visitImplCPU(const type& op)
+
+#define PP_CALL_VISIT_CPU(op)                                                     \
+  visitImplCPU(op)
+
 #define FIXED_BATCH_NUM (1u)
 
 namespace onnc {
@@ -438,24 +444,24 @@ using namespace internal;
 namespace nvdla {
 
 #include "CodeEmitVisitor/Add.inc"
-// #include "CodeEmitVisitor/AddEMU.inc"
+#include "CodeEmitVisitor/AddEMU.inc"
 #include "CodeEmitVisitor/AveragePool.inc"
-// #include "CodeEmitVisitor/AveragePoolEMU.inc"
+#include "CodeEmitVisitor/AveragePoolEMU.inc"
 #include "CodeEmitVisitor/Concat.inc"
-// #include "CodeEmitVisitor/ConcatEMU.inc"
+#include "CodeEmitVisitor/ConcatEMU.inc"
 #include "CodeEmitVisitor/Conv.inc"
-// #include "CodeEmitVisitor/ConvEMU.inc"
+#include "CodeEmitVisitor/ConvEMU.inc"
 #include "CodeEmitVisitor/Initializer.inc"
 #include "CodeEmitVisitor/InputOperator.inc"
 #include "CodeEmitVisitor/LRN.inc"
 #include "CodeEmitVisitor/MaxPool.inc"
-// #include "CodeEmitVisitor/MaxPoolEMU.inc"
+#include "CodeEmitVisitor/MaxPoolEMU.inc"
 #include "CodeEmitVisitor/Mul.inc"
-// #include "CodeEmitVisitor/MulEMU.inc"
+#include "CodeEmitVisitor/MulEMU.inc"
 #include "CodeEmitVisitor/NvDlaShuffle.inc"
 #include "CodeEmitVisitor/OutputOperator.inc"
 #include "CodeEmitVisitor/Relu.inc"
-// #include "CodeEmitVisitor/ReluEMU.inc"
+#include "CodeEmitVisitor/ReluEMU.inc"
 #include "CodeEmitVisitor/Reshape.inc"
 #include "CodeEmitVisitor/Softmax.inc"
 #include "CodeEmitVisitor/Split.inc"

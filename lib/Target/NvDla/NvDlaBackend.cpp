@@ -119,7 +119,7 @@ NvDlaBackend::NvDlaBackend(const TargetOptions& pOptions)
   , NvDlaConstants(
       getConfig(selectConfigSet(), nvdla::ExecutionMode::direct, false))
   , m_VerboseLevel(pOptions.getVerboseLevel())
-  , m_pMeta(*this)
+  , m_pMeta(*this, pOptions.getOpMapper())
   , m_CodeEmitVisitor(*this, m_pMeta,
                       std::bind(&NvDlaBackend::getCbufAllocType, this, std::placeholders::_1, std::placeholders::_2,
                                 std::placeholders::_3, std::placeholders::_4),

@@ -1,4 +1,4 @@
-PP_DEFINE_VISIT(Conv, pOp)
+PP_DEFINE_VISIT_CPU(Conv, pOp)
 {
   const Tensor* input_X_t       = pOp.getInput(0);
   int32_t       input_X_ndim    = input_X_t->getNumOfDimensions();

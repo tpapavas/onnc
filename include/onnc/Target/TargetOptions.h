@@ -78,6 +78,10 @@ public:
 
   void setVerboseLevel(unsigned verboseLevel) noexcept { m_VerboseLevel = verboseLevel; }
 
+  std::string getOpMapper() const { return m_OpMapper; }
+
+  void setOpMapper(std::string opMapper) { m_OpMapper = opMapper; }
+
 private:
   bool        m_PrintModuleBeforeSel  = false;
   bool        m_IgnoreCalibrationStep = false;
@@ -85,6 +89,7 @@ private:
   bool        m_AddDummyWeight        = false;
   unsigned    m_VerboseLevel          = 0;
   std::string m_OptOnnxModel          = "";
+  std::string m_OpMapper              = "";
 };
 
 } // namespace onnc

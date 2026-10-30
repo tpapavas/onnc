@@ -1,4 +1,4 @@
-PP_DEFINE_VISIT(Concat, pOp)
+PP_DEFINE_VISIT_CPU(Concat, pOp)
 {
         // Prepare attributes
         int axis = pOp.getAxis().value();

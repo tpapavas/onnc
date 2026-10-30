@@ -1,5 +1,14 @@
 PP_DEFINE_VISIT(Relu, pOp)
 {
+  NvDlaBackendMeta::OpEngineMapper::Category engine_category =
+      m_pMeta.m_OpEngineMapper.getAndSetOpEngine(m_pMeta.m_OpEngineMapper,
+                                                 NvDlaBackendMeta::OpEngineMapper::NvDlaOpType::sdp);
+  outs() << "[MAPPING] op engine: " << static_cast<std::underlying_type<NvDlaBackendMeta::OpEngineMapper::Category>::type>(engine_category) << "\n";
+  if (engine_category == NvDlaBackendMeta::OpEngineMapper::Category::emu) {
+    PP_CALL_VISIT_CPU(pOp);
+
+    return;
+  }
   const Tensor* input_X_t       = pOp.getInput(0);
   int32_t       input_X_ndim    = input_X_t->getNumOfDimensions();
   int32_t       input_X_dims[4] = {1, 1, 1, 1};
