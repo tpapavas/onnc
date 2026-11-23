@@ -9,6 +9,11 @@ PP_DEFINE_VISIT(MaxPool, pOp)
 
     return;
   }
+
+  std::vector<NvDlaDlaOperation*> maxpool_ops;
+  std::vector<NvDlaDlaOperation*> fuse_ops;
+  std::vector<NvDlaDlaOperation*> prev_ops;
+  for (int nn = 0; nn < BATCH_NUM; nn++ ) {
   const Tensor* input_X_t       = pOp.getInput(0);
   int32_t       input_X_ndim    = input_X_t->getNumOfDimensions();
   int32_t       input_X_dims[4] = {1, 1, 1, 1};
@@ -79,8 +84,24 @@ PP_DEFINE_VISIT(MaxPool, pOp)
 
   struct dla_pdp_surface_desc* maxpool_surf = (struct dla_pdp_surface_desc*)(&(maxpool_op->op_surf));
   maxpool_surf->src_data.type               = DLA_MEM_MC;
-  maxpool_surf->src_data.address            = issueDlaAddr(*input_X_t, X_cube);
-  maxpool_surf->src_data.size               = X_mle.size;
+//   maxpool_surf->src_data.address            = issueDlaAddr(*input_X_t, X_cube);
+  if (nn == 0) {
+      maxpool_surf->src_data.address = issueDlaAddr(*input_X_t, X_cube);
+  } else {
+    const bool isInput = isa<InputOperator>(getProducer(*input_X_t));
+    if (!isInput) {
+      NvDlaBackendMeta::Offset memoryOffset = 0;
+      maxpool_surf->src_data.address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*input_X_t), memoryOffset);
+      maxpool_surf->src_data.offset = X_cube.size;
+    } else {
+      NvDlaBackendMeta::Offset memoryOffset = X_cube.size;
+      maxpool_surf->src_data.address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*input_X_t), memoryOffset);
+    }
+  }
+//   maxpool_surf->src_data.size               = X_mle.size;
+  maxpool_surf->src_data.size               = X_cube.size;
   maxpool_surf->src_data.width              = X_cube.dim_w;
   maxpool_surf->src_data.height             = X_cube.dim_h;
   maxpool_surf->src_data.channel            = X_cube.dim_c;
@@ -89,8 +110,25 @@ PP_DEFINE_VISIT(MaxPool, pOp)
   maxpool_surf->src_data.plane_stride       = X_cube.stride_plane;
 
   maxpool_surf->dst_data.type         = DLA_MEM_MC;
-  maxpool_surf->dst_data.address      = issueDlaAddr(*output_Y_t, Y_cube);
-  maxpool_surf->dst_data.size         = Y_mle.size;
+//   maxpool_surf->dst_data.address      = issueDlaAddr(*output_Y_t, Y_cube);
+  if (nn == 0) {
+      maxpool_surf->dst_data.address = issueDlaAddr(*output_Y_t, Y_cube);
+  } else {
+    onnc::Tensor* output_Y_tt = output_Y_t->clone();
+    const bool isOutput = isa<OutputOperator>(getConsumer(*output_Y_tt, 0));
+    if (!isOutput) {
+      NvDlaBackendMeta::Offset memoryOffset = 0;
+      maxpool_surf->dst_data.address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*output_Y_t), memoryOffset);
+      maxpool_surf->dst_data.offset = Y_cube.size;
+    } else {
+      NvDlaBackendMeta::Offset memoryOffset = Y_cube.size;
+      maxpool_surf->dst_data.address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*output_Y_t), memoryOffset);
+    }
+  }
+//   maxpool_surf->dst_data.size         = Y_mle.size;
+  maxpool_surf->dst_data.size         = Y_cube.size;
   maxpool_surf->dst_data.width        = Y_cube.dim_w;
   maxpool_surf->dst_data.height       = Y_cube.dim_h;
   maxpool_surf->dst_data.channel      = Y_cube.dim_c;
@@ -100,5 +138,18 @@ PP_DEFINE_VISIT(MaxPool, pOp)
 
   fitPdpInputToWindows(*maxpool_desc, *maxpool_surf, output_Y_dims[3], output_Y_dims[2]);
 
-  issueDlaOp(maxpool_op, NULL, m_pMeta.m_pPrevOp);
+  // issueDlaOp(maxpool_op, NULL, m_pMeta.m_pPrevOp);
+  maxpool_ops.push_back(maxpool_op);
+
+  } // BATCHES
+
+  uint32_t num_ops = m_pMeta.m_DLAOperationList.size();
+  if (num_ops >= BATCH_NUM) {
+    outs() << "[MAX POOL] Creating prev_ops list... (num ops: " << num_ops << ")\n";
+    for (int nn = 0; nn < BATCH_NUM; nn++) {
+        outs() << "Getting #" << (num_ops-BATCH_NUM+nn) << " op\n";
+        prev_ops.push_back(m_pMeta.m_DLAOperationList[num_ops-BATCH_NUM+nn]);
+    }
+  }
+  issueDlaOpBatched(maxpool_ops, fuse_ops, prev_ops);
 }

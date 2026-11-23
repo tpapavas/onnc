@@ -85,6 +85,8 @@ public:
   // if no scale is reachable.
   float getActivationScaleResolved(const Tensor* tensor) const;
 
+  void setBatchNum(uint32_t bn) { NvDlaConstants::setBatchNum(bn); }
+
 private:
   MemoryListEntryId packWeight(const Tensor& weight, NvDlaDims destDims, Tensor::Dimension numFrontPaddingChannels,
                                Tensor::Dimension outputChannelOffset);
@@ -102,6 +104,8 @@ private:
   AddressListEntryId issueEmuAddr(MemoryListEntryId mid);
   void               issueDlaOp(NvDlaDlaOperation* op, NvDlaDlaOperation* op_fuse, NvDlaDlaOperation* op_prev);
   void               issueDlaOp(std::unique_ptr<NvDlaDlaOperation> op);
+  void               issueDlaOpBatched(std::vector<NvDlaDlaOperation*> op, std::vector<NvDlaDlaOperation*> op_fuse, std::vector<NvDlaDlaOperation*> op_prev,
+                                       uint32_t ops_per_batch = 1);
   AddressListEntryId issueDlaAddr(const Tensor& tensor, const NvDlaCubeInfo& cube, Tensor::Dimension channelOffset,
                                   NvDlaBackendMeta::Offset hOffset);
   AddressListEntryId issueDlaAddr(const Tensor& tensor, const NvDlaCubeInfo& cube);

@@ -2,7 +2,7 @@
 
 using namespace genmem;
 
-Cube::Cube(TYPE type, int w, int h, int c, int line_stride, int surf_stride, int planar_stride)
+Cube::Cube(TYPE type, int w, int h, int c, int line_stride, int surf_stride, int planar_stride, int batch_num)
 {
   W = w;
   H = h;
@@ -12,11 +12,13 @@ Cube::Cube(TYPE type, int w, int h, int c, int line_stride, int surf_stride, int
   this->surf_stride   = surf_stride;
   this->planar_stride = planar_stride;
   this->type          = type;
+  this->batch_num     = batch_num;
 
   address_entry = -1;
 }
 
 void Cube::allocate_memory(Memory& mem) { address_entry = mem.request_memory(used_entry_number()); }
+void Cube::allocate_memory_batched(Memory& mem) { address_entry = mem.request_memory(used_entry_number()*batch_num); }
 
 int Cube::used_entry_number() const
 {

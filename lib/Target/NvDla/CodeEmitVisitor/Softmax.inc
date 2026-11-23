@@ -2,6 +2,7 @@ PP_DEFINE_VISIT(Softmax, pOp)
 {
   using namespace internal;
 
+for (int nn = 0; nn < BATCH_NUM; nn++ ) {
   m_pMeta.m_DlaAddresses = m_pMeta.m_AddressListEntries.size();
 
   const Tensor* input_input_t       = pOp.getInput(0);
@@ -60,8 +61,25 @@ PP_DEFINE_VISIT(Softmax, pOp)
   op_desc->common = common;
 
   struct emu_softmax_buffer_descs* op_buf = (struct emu_softmax_buffer_descs*)(&(softmax_op->op_buf));
-  op_buf->src_data.addressIndex           = issueEmuAddr(input_mid);
-  op_buf->src_data.size                   = m_pMeta.getMemoryListEntrySize(input_mid);
+//   op_buf->src_data.addressIndex           = issueEmuAddr(input_mid);
+  if (nn == 0) {
+      op_buf->src_data.addressIndex = issueEmuAddr(input_mid);
+  } else {
+    const bool isInput = isa<InputOperator>(getProducer(*input_input_t));
+    if (!isInput) {
+      NvDlaBackendMeta::Offset memoryOffset = 0;
+      op_buf->src_data.addressIndex =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*input_input_t), memoryOffset);
+      op_buf->src_data.addressIndexOffset = iinfo.size;
+    } else {
+      NvDlaBackendMeta::Offset memoryOffset = iinfo.size;
+      op_buf->src_data.addressIndex =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*input_input_t), memoryOffset);
+    }
+  }
+//   op_buf->src_data.size                   = m_pMeta.getMemoryListEntrySize(input_mid);
+  op_buf->src_data.size                   = iinfo.size;
+//   op_buf->src_data.format                 = 3; //DLA_PRECISION;
   op_buf->src_data.format                 = emuFormat;
   op_buf->src_data.width                  = input_input_dims[3];
   op_buf->src_data.height                 = input_input_dims[2];
@@ -69,8 +87,26 @@ PP_DEFINE_VISIT(Softmax, pOp)
   op_buf->src_data.line_stride            = iinfo.stride_line;
   op_buf->src_data.surf_stride            = iinfo.stride_surface;
 
-  op_buf->dst_data.addressIndex = issueEmuAddr(output_mid);
-  op_buf->dst_data.size         = m_pMeta.getMemoryListEntrySize(output_mid);
+//   op_buf->dst_data.addressIndex = issueEmuAddr(output_mid);
+  if (nn == 0) {
+      op_buf->dst_data.addressIndex = issueEmuAddr(output_mid);
+  } else {
+    onnc::Tensor* output_Y_tt = output_output_t->clone();
+    const bool isOutput = isa<OutputOperator>(getConsumer(*output_Y_tt, 0));
+    if (!isOutput) {
+      NvDlaBackendMeta::Offset memoryOffset = 0;
+      op_buf->dst_data.addressIndex =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*output_output_t), memoryOffset);
+      op_buf->dst_data.addressIndexOffset = oinfo.size;
+    } else {
+      NvDlaBackendMeta::Offset memoryOffset = oinfo.size;
+      op_buf->dst_data.addressIndex =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*output_output_t), memoryOffset);
+    }
+  }
+//   op_buf->dst_data.size         = m_pMeta.getMemoryListEntrySize(output_mid);
+  op_buf->dst_data.size         = oinfo.size;
+//   op_buf->dst_data.format       = 3; //DLA_PRECISION;
   op_buf->dst_data.format       = emuFormat;
   op_buf->dst_data.width        = output_output_dims[3];
   op_buf->dst_data.height       = output_output_dims[2];
@@ -79,4 +115,6 @@ PP_DEFINE_VISIT(Softmax, pOp)
   op_buf->dst_data.surf_stride  = oinfo.stride_surface;
 
   issueEmuOp(softmax_op);
+} // BATCHES
+
 }

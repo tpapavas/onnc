@@ -15,11 +15,12 @@ public:
     PLANAR
   };
 
-  Cube(TYPE type, int w, int h, int c, int line, int surf, int planar);
+  Cube(TYPE type, int w, int h, int c, int line, int surf, int planar, int batch_num = 1);
   Cube() {}
 
   string get_type() { return type == TYPE::CUBE ? "CUBE" : "PLANAR"; }
   void   allocate_memory(Memory& mem);
+  void   allocate_memory_batched(Memory& mem);
 
   int used_entry_number() const;
 
@@ -35,6 +36,7 @@ public:
   int  W, H, C;
   int  line_stride, surf_stride, planar_stride;
   int  address_entry;
+  int batch_num;
 };
 } // namespace genmem
 

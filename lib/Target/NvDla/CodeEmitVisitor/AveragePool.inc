@@ -9,6 +9,11 @@ PP_DEFINE_VISIT(AveragePool, pOp)
 
     return;
   }
+
+  std::vector<NvDlaDlaOperation*> avgpool_ops;
+  std::vector<NvDlaDlaOperation*> fuse_ops;
+  std::vector<NvDlaDlaOperation*> prev_ops;
+  for (int nn = 0; nn < BATCH_NUM; nn++ ) {
   const Tensor* input_X_t       = pOp.getInput(0);
   int32_t       input_X_ndim    = input_X_t->getNumOfDimensions();
   int32_t       input_X_dims[4] = {1, 1, 1, 1};
@@ -85,8 +90,24 @@ PP_DEFINE_VISIT(AveragePool, pOp)
 
   struct dla_pdp_surface_desc* avgpool_surf = (struct dla_pdp_surface_desc*)(&(avgpool_op->op_surf));
   avgpool_surf->src_data.type               = DLA_MEM_MC;
-  avgpool_surf->src_data.address            = issueDlaAddr(*input_X_t, X_cube);
-  avgpool_surf->src_data.size               = X_mle.size;
+//   avgpool_surf->src_data.address            = issueDlaAddr(*input_X_t, X_cube);
+  if (nn == 0) {
+      avgpool_surf->src_data.address = issueDlaAddr(*input_X_t, X_cube);
+  } else {
+    const bool isInput = isa<InputOperator>(getProducer(*input_X_t));
+    if (!isInput) {
+      NvDlaBackendMeta::Offset memoryOffset = 0;
+      avgpool_surf->src_data.address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*input_X_t), memoryOffset);
+      avgpool_surf->src_data.offset = X_cube.size;
+    } else {
+      NvDlaBackendMeta::Offset memoryOffset = X_cube.size;
+      avgpool_surf->src_data.address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*input_X_t), memoryOffset);
+    }
+  }
+//   avgpool_surf->src_data.size               = X_mle.size;
+  avgpool_surf->src_data.size               = X_cube.size;  // X_mle.size = X_cube.size*BATCH_NUM
   avgpool_surf->src_data.width              = X_cube.dim_w;
   avgpool_surf->src_data.height             = X_cube.dim_h;
   avgpool_surf->src_data.channel            = X_cube.dim_c;
@@ -95,8 +116,25 @@ PP_DEFINE_VISIT(AveragePool, pOp)
   avgpool_surf->src_data.plane_stride       = X_cube.stride_plane;
 
   avgpool_surf->dst_data.type         = DLA_MEM_MC;
-  avgpool_surf->dst_data.address      = issueDlaAddr(*output_Y_t, Y_cube);
-  avgpool_surf->dst_data.size         = Y_mle.size;
+//   avgpool_surf->dst_data.address      = issueDlaAddr(*output_Y_t, Y_cube);
+  if (nn == 0) {
+      avgpool_surf->dst_data.address = issueDlaAddr(*output_Y_t, Y_cube);
+  } else {
+    onnc::Tensor* output_Y_tt = output_Y_t->clone();
+    const bool isOutput = isa<OutputOperator>(getConsumer(*output_Y_tt, 0));
+    if (!isOutput) {
+      NvDlaBackendMeta::Offset memoryOffset = 0;
+      avgpool_surf->dst_data.address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*output_Y_t), memoryOffset);
+      avgpool_surf->dst_data.offset = Y_cube.size;
+    } else {
+      NvDlaBackendMeta::Offset memoryOffset = Y_cube.size;
+      avgpool_surf->dst_data.address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*output_Y_t), memoryOffset);
+    }
+  }
+//   avgpool_surf->dst_data.size         = Y_mle.size;
+  avgpool_surf->dst_data.size         = Y_cube.size;
   avgpool_surf->dst_data.width        = Y_cube.dim_w;
   avgpool_surf->dst_data.height       = Y_cube.dim_h;
   avgpool_surf->dst_data.channel      = Y_cube.dim_c;
@@ -106,5 +144,18 @@ PP_DEFINE_VISIT(AveragePool, pOp)
 
   fitPdpInputToWindows(*avgpool_desc, *avgpool_surf, output_Y_dims[3], output_Y_dims[2]);
 
-  issueDlaOp(avgpool_op, NULL, m_pMeta.m_pPrevOp);
+//   issueDlaOp(avgpool_op, NULL, m_pMeta.m_pPrevOp);
+  avgpool_ops.push_back(avgpool_op);
+
+  } // BATCHES
+
+  uint32_t num_ops = m_pMeta.m_DLAOperationList.size();
+  if (num_ops >= BATCH_NUM) {
+    outs() << "[AVG POOL] Creating prev_ops list... (num ops: " << num_ops << ")\n";
+    for (int nn = 0; nn < BATCH_NUM; nn++) {
+        outs() << "Getting #" << (num_ops-BATCH_NUM+nn) << " op\n";
+        prev_ops.push_back(m_pMeta.m_DLAOperationList[num_ops-BATCH_NUM+nn]);
+    }
+  }
+  issueDlaOpBatched(avgpool_ops, fuse_ops, prev_ops);
 }

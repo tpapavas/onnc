@@ -1031,6 +1031,150 @@ void CodeEmitVisitor::issueDlaOp(std::unique_ptr<NvDlaDlaOperation> operation)
   issueDlaOp(operation.release(), nullptr, m_pMeta.m_pPrevOp);
 }
 
+void CodeEmitVisitor::issueDlaOpBatched(std::vector<NvDlaDlaOperation*> ops, std::vector<NvDlaDlaOperation*> ops_fuse, std::vector<NvDlaDlaOperation*> ops_prev,
+                                        uint32_t ops_per_batch)
+{
+  if (m_pMeta.isNewTaskBoundary(NvDlaBackendMeta::OperationMeta::Category::dla)) {
+    // Each DLA task block should start with a fresh dependency context and a task-local op index space.
+    // Task-to-task ordering is handled by the loadable submit/event graph,
+    // not by op-level consumer links across task boundaries.
+    m_pMeta.resetCurrentTaskDlaState();
+    m_pMeta.m_pPrevOp = nullptr;
+    std::fill(std::begin(m_pMeta.m_pDepOp), std::end(m_pMeta.m_pDepOp), nullptr);
+  }
+
+  assert(ops.size() == BATCH_NUM*ops_per_batch);
+
+  NvDlaDlaOperation* op = ops.front();
+  NvDlaDlaOperation* op_fuse = (ops_fuse.size() > 0) ? ops_fuse.front() : NULL;
+  NvDlaDlaOperation* op_prev = (ops_prev.size() > 0) ? ops_prev.front() : NULL;
+
+  NvDlaDlaOperation* op_prev_g = (ops_prev.size() > 0) ? ops_prev.back() : NULL;
+
+for (int nn = 0; nn < BATCH_NUM*ops_per_batch; nn++) {
+  op = ops[nn];
+  op_prev = (ops_prev.size() > 0) ? ops_prev[nn] : NULL;
+  struct dla_common_op_desc* op_desc = &(op->op_dep);
+  int                        op_type = op_desc->op_type;
+  // op_desc->index            = m_pMeta.m_DLAOperationList.size();
+  const std::size_t          op_index = m_pMeta.nextDlaTaskLocalIndex();
+  op_desc->index            = op_index;
+  op_desc->roi_index        = 0;
+  op_desc->dependency_count = 0;
+
+  if (op_prev != NULL && !m_pMeta.isLastDlaOperationInTaskEntry(*op_prev)) {
+    struct dla_common_op_desc* prev_op_desc = &(op_prev->op_dep);
+    /**
+     * If prev op already has an
+     */
+    // if (prev_op_desc->consumers[op_type].index != -1) {
+    //   // full-DLA execution only; for DLA/EMU mixed loadable, this indexing needs to be modified
+    //   int16_t old_consumer_index = prev_op_desc->consumers[op_type].index;
+    //   dla_common_op_desc* old_consumer_op_desc = &(m_pMeta.m_DLAOperationList[old_consumer_index]->op_dep);
+    //   old_consumer_op_desc->dependency_count--;
+    // }
+    if (prev_op_desc->consumers[op_type].index == -1) {
+      prev_op_desc->consumers[op_type].index  = op_desc->index;
+      prev_op_desc->consumers[op_type].event  = 1;
+      op_desc->dependency_count++;
+      outs() << "[DEBUG] OP " << prev_op_desc->index << " add consumer [" << op_type << "]" << " index=" << op_desc->index << " event=1\n";
+    } else {
+      // for ops that prev op and current op (model-wise)
+      // are of the same type
+      // In this case we define a stricter dependency chain
+      // E.g. bn=3, SDP(0,0) --1--> SDP(0,1) --1--> SDP(0,2)
+      //     --1--> SDP(1,0) --1--> SDP(1,1) --1--> SDP(1,2)
+      prev_op_desc->consumers[op_type].event  = 1;
+      outs() << "[DEBUG] OP " << prev_op_desc->index << " add consumer [" << op_type << "]" << " index=" << prev_op_desc->consumers[op_type].index << " event=1\n";
+    }
+  }
+
+  /**
+   * TODO: this dependency must be added to
+   * the last same-type op, last batch id
+   */
+  if (m_pMeta.m_pDepOp[op_type] != NULL && !m_pMeta.isLastDlaOperationInTaskEntry(*m_pMeta.m_pDepOp[op_type])) {
+    struct dla_common_op_desc* dep_op_desc = &(m_pMeta.m_pDepOp[op_type]->op_dep);
+    if (m_pMeta.m_pDepOp[op_type] != op_prev) {
+      outs() << "[DEBUG] OP " << dep_op_desc->index << " add consumer [" << op_type << "]" << " index=" << op_desc->index << " event=2\n";
+      dep_op_desc->consumers[op_type].index = op_desc->index;
+      if ((op_type == DLA_OP_CONV) && (op_prev_g == NULL)) { // splitted convolution layers other than the first one
+        dep_op_desc->consumers[op_type].event = 3;
+      } else { // first splitted layer or other normal layers
+        dep_op_desc->consumers[op_type].event = 2;
+      }
+      op_desc->dependency_count++;
+    }
+  }
+
+  m_pMeta.m_DlaNetworkDesc.op_head[op_type] = (m_pMeta.m_DlaNetworkDesc.op_head[op_type] < 0)
+                                                ? static_cast<int16_t>(op_index)
+                                                : m_pMeta.m_DlaNetworkDesc.op_head[op_type];
+
+  m_pMeta.m_DLAOperationList.push_back(op);
+  m_pMeta.m_pDepOp[op_type] = op;
+
+  op_prev_g = op;
+
+  m_pMeta.appendOperationMeta(m_pMeta.m_DLAOperationList.size() - 1,
+                              NvDlaBackendMeta::OperationMeta::Category::dla);
+}
+
+if (ops_fuse.size() > 0) {
+for (int nn = 0; nn < BATCH_NUM*ops_per_batch; nn++) {
+  op = ops[nn];
+  struct dla_common_op_desc* op_desc = &(op->op_dep);
+  int                        op_type = op_desc->op_type;
+
+  op_fuse = ops_fuse[nn];
+
+  if (op_fuse != NULL) {
+    struct dla_common_op_desc* fuse_op_desc = &(op_fuse->op_dep);
+    int                        op_fuse_type = fuse_op_desc->op_type;
+    // fuse_op_desc->index                     = m_pMeta.m_DLAOperationList.size();
+    const std::size_t          fuse_index = m_pMeta.nextDlaTaskLocalIndex();
+    fuse_op_desc->index                     = fuse_index;
+    fuse_op_desc->roi_index                 = 0;
+    fuse_op_desc->dependency_count          = 1;
+    fuse_op_desc->fused_parent.index        = op_desc->index;
+    fuse_op_desc->fused_parent.event        = 3;
+
+    outs() << "[DEBUG] OP " << op_desc->index << " add consumer [" << op_fuse_type << "]" << " index=" << fuse_op_desc->index << " event=1\n";
+    op_desc->consumers[op_fuse_type].index = fuse_op_desc->index;
+    op_desc->consumers[op_fuse_type].event = 2;
+    if (op_prev != NULL) {
+      struct dla_common_op_desc* prev_op_desc = &(op_prev->op_dep);
+      prev_op_desc->consumers[op_type].event  = 1;
+    }
+    op_desc->dependency_count++;
+
+    if (m_pMeta.m_pDepOp[op_fuse_type] != NULL) {
+      struct dla_common_op_desc* dep_op_desc     = &(m_pMeta.m_pDepOp[op_fuse_type]->op_dep);
+      outs() << "[DEBUG] OP " << dep_op_desc->index << " add consumer [" << op_fuse_type << "]" << " index=" << fuse_op_desc->index << " event=2\n";
+      dep_op_desc->consumers[op_fuse_type].index = fuse_op_desc->index;
+      dep_op_desc->consumers[op_fuse_type].event = 2;
+
+      fuse_op_desc->dependency_count++;
+    }
+    m_pMeta.m_pDepOp[op_fuse_type] = op_fuse;
+
+    m_pMeta.m_DlaNetworkDesc.op_head[op_fuse_type] = (m_pMeta.m_DlaNetworkDesc.op_head[op_fuse_type] < 0)
+                                                       ? static_cast<int16_t>(fuse_index)
+                                                       : m_pMeta.m_DlaNetworkDesc.op_head[op_fuse_type];
+
+    m_pMeta.m_DLAOperationList.push_back(op_fuse);
+    m_pMeta.m_pPrevOp = op_fuse;
+
+    m_pMeta.appendOperationMeta(m_pMeta.m_DLAOperationList.size() - 1,
+                                NvDlaBackendMeta::OperationMeta::Category::dla);
+  } else {
+    m_pMeta.m_pPrevOp = op;
+  }
+} // BATCHES
+} // HAS FUSE
+
+}
+
 void CodeEmitVisitor::emitSdp(const ComputeOperator& op, const Tensor& first, const Tensor& second, const Tensor& output)
 {
   assert(!(isConstant(first) && isConstant(second)) && "cannot support 2 constant tensors");
@@ -1041,6 +1185,11 @@ void CodeEmitVisitor::emitSdp(const ComputeOperator& op, const Tensor& first, co
     emitSdp(op, second, first, output);
     return;
   }
+
+  std::vector<NvDlaDlaOperation*> sdp_ops;
+  std::vector<NvDlaDlaOperation*> fuse_ops;
+  std::vector<NvDlaDlaOperation*> prev_ops;
+  for (int nn = 0; nn < BATCH_NUM; nn++ ) {
 
   assert(!isConstant(first));
 
@@ -1143,29 +1292,109 @@ void CodeEmitVisitor::emitSdp(const ComputeOperator& op, const Tensor& first, co
   auto& surface = getSurface<NvDlaOpType::sdp>(*operation);
 
   const NvDlaCubeInfo firstCubeInfo = makeCubeInfo(*this, NVDLA_CUBE_FEATURE, first);
+
+  int16_t src_data_address = -1;
+  uint32_t src_data_offset = 0;
+  if (nn == 0) {
+    src_data_address = issueDlaAddr(first, firstCubeInfo);
+  } else {
+    const bool isInput = isa<InputOperator>(getProducer(first));
+    if (!isInput) {
+      NvDlaBackendMeta::Offset memoryOffset = 0;
+      src_data_address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(first), memoryOffset);
+      src_data_offset = firstCubeInfo.size; // maybe offset = (size x nn)
+    } else {
+      NvDlaBackendMeta::Offset memoryOffset = firstCubeInfo.size; // maybe offset = (size x nn)
+      src_data_address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(first), memoryOffset);
+    }
+  }
+
   NvDlaDataCubeModifier(surface.src_data, NvDlaMemType::mc)
-    .setSize(m_pMeta.getMemoryListEntrySize(first))
-    .setAddress(issueDlaAddr(first, firstCubeInfo))
+    // .setSize(m_pMeta.getMemoryListEntrySize(first))
+    .setSize(firstCubeInfo.size)
+    // .setAddress(issueDlaAddr(first, firstCubeInfo))
+    .setAddress(src_data_address)
     .setInfo(firstCubeInfo);
+  surface.src_data.offset = src_data_offset;
 
   if (category == BroadcastCategory::LAYER) {
     NvDlaDataCubeModifier(surface.x1_data, NvDlaMemType::hw).setAddress(-1);
   } else {
     MemoryListEntryId   memoryId;
     const NvDlaCubeInfo secondCubeInfo = makeCubeInfo(*this, getSdpXSingleCubeType(second, DLA_PRECISION), second);
+
+    int16_t x1_data_address = -1;
+    uint32_t x1_data_offset = 0;
+    if (nn == 0) {
+      x1_data_address = issueSDPOperand(second, secondCubeInfo, memoryId);
+    } else {
+      const bool isInput = isa<InputOperator>(getProducer(second));
+      if (!isInput) {
+        NvDlaBackendMeta::Offset memoryOffset = 0;
+        x1_data_address =
+          m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(second), memoryOffset);
+        x1_data_offset = isConstant(second) ? 0 : secondCubeInfo.size; // maybe offset = (size x nn)
+      } else {
+        NvDlaBackendMeta::Offset memoryOffset = isConstant(second) ? 0 : secondCubeInfo.size; // maybe offset = (size x nn)
+        x1_data_address =
+          m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(second), memoryOffset);
+      }
+    }
+
     NvDlaDataCubeModifier(surface.x1_data, NvDlaMemType::mc)
-      .setAddress(issueSDPOperand(second, secondCubeInfo, memoryId))
-      .setSize(m_pMeta.getMemoryListEntrySize(memoryId))
+    //   .setAddress(issueSDPOperand(second, secondCubeInfo, memoryId))
+      .setAddress(x1_data_address)
+    //   .setSize(m_pMeta.getMemoryListEntrySize(memoryId))
+      .setSize(secondCubeInfo.size)
       .setInfo(secondCubeInfo);
+    surface.x1_data.offset = x1_data_offset;
   }
 
   const NvDlaCubeInfo outputCubeInfo = makeCubeInfo(*this, NVDLA_CUBE_FEATURE, output);
-  NvDlaDataCubeModifier(surface.dst_data, NvDlaMemType::mc)
-    .setSize(m_pMeta.getMemoryListEntrySize(output))
-    .setAddress(issueDlaAddr(output, outputCubeInfo))
-    .setInfo(outputCubeInfo);
 
-  issueDlaOp(std::move(operation));
+  int16_t dst_data_address = -1;
+  uint32_t dst_data_offset = 0;
+  if (nn == 0) {
+    dst_data_address = issueDlaAddr(output, outputCubeInfo);
+  } else {
+    const bool isInput = isa<InputOperator>(getProducer(output));
+    if (!isInput) {
+      NvDlaBackendMeta::Offset memoryOffset = 0;
+      dst_data_address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(output), memoryOffset);
+      dst_data_offset = outputCubeInfo.size; // maybe offset = (size x nn)
+    } else {
+      NvDlaBackendMeta::Offset memoryOffset = outputCubeInfo.size; // maybe offset = (size x nn)
+      dst_data_address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(output), memoryOffset);
+    }
+  }
+
+  NvDlaDataCubeModifier(surface.dst_data, NvDlaMemType::mc)
+    // .setSize(m_pMeta.getMemoryListEntrySize(output))
+    .setSize(outputCubeInfo.size)
+    // .setAddress(issueDlaAddr(output, outputCubeInfo))
+    .setAddress(dst_data_address)
+    .setInfo(outputCubeInfo);
+  surface.dst_data.offset = dst_data_offset;
+
+//   issueDlaOp(std::move(operation));
+  NvDlaDlaOperation *operationPtr = operation.release();
+  sdp_ops.push_back(operationPtr);
+
+  } // BATCHES
+
+  uint32_t num_ops = m_pMeta.m_DLAOperationList.size();
+  if (num_ops >= BATCH_NUM) {
+    outs() << "[SDP] Creating prev_ops list... (num ops: " << num_ops << ")\n";
+    for (int nn = 0; nn < BATCH_NUM; nn++) {
+        outs() << "Getting #" << (num_ops-BATCH_NUM+nn) << " op\n";
+        prev_ops.push_back(m_pMeta.m_DLAOperationList[num_ops-BATCH_NUM+nn]);
+    }
+  }
+  issueDlaOpBatched(sdp_ops, fuse_ops, prev_ops);
 }
 
 void CodeEmitVisitor::emitEmuSdp(const ComputeOperator& op, const Tensor& first, const Tensor& second, const Tensor& output)

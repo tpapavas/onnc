@@ -61,6 +61,8 @@ public:
 
   void setOpMapper(const std::string& opMapper) { m_TargetOptions.setOpMapper(opMapper); }
 
+  void setBatchNum(uint32_t bn) { m_TargetOptions.setBatchNum(bn); }
+
 private:
   onnc::Path m_Input;
   onnc::Path m_Output;

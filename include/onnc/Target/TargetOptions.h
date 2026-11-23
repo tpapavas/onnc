@@ -82,6 +82,10 @@ public:
 
   void setOpMapper(std::string opMapper) { m_OpMapper = opMapper; }
 
+  uint32_t getBatchNum() const { return m_BatchNum; }
+
+  void setBatchNum(uint32_t bn) { m_BatchNum = bn; }
+
 private:
   bool        m_PrintModuleBeforeSel  = false;
   bool        m_IgnoreCalibrationStep = false;
@@ -90,6 +94,7 @@ private:
   unsigned    m_VerboseLevel          = 0;
   std::string m_OptOnnxModel          = "";
   std::string m_OpMapper              = "";
+  uint32_t    m_BatchNum              = 1;
 };
 
 } // namespace onnc

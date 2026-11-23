@@ -9,6 +9,11 @@ PP_DEFINE_VISIT(Relu, pOp)
 
     return;
   }
+
+  std::vector<NvDlaDlaOperation*> relu_ops;
+  std::vector<NvDlaDlaOperation*> fuse_ops;
+  std::vector<NvDlaDlaOperation*> prev_ops;
+  for (int nn = 0; nn < BATCH_NUM; nn++ ) {
   const Tensor* input_X_t       = pOp.getInput(0);
   int32_t       input_X_ndim    = input_X_t->getNumOfDimensions();
   int32_t       input_X_dims[4] = {1, 1, 1, 1};
@@ -76,8 +81,24 @@ PP_DEFINE_VISIT(Relu, pOp)
 
   struct dla_sdp_surface_desc* relu_surf = (struct dla_sdp_surface_desc*)(&(relu_op->op_surf));
   relu_surf->src_data.type               = DLA_MEM_MC;
-  relu_surf->src_data.address            = issueDlaAddr(*input_X_t, X_cube);
-  relu_surf->src_data.size               = m_pMeta.getMemoryListEntrySize(*input_X_t);
+  // relu_surf->src_data.address            = issueDlaAddr(*input_X_t, X_cube);
+  if (nn == 0) {
+      relu_surf->src_data.address = issueDlaAddr(*input_X_t, X_cube);
+  } else {
+    const bool isInput = isa<InputOperator>(getProducer(*input_X_t));
+    if (!isInput) {
+      NvDlaBackendMeta::Offset memoryOffset = 0;
+      relu_surf->src_data.address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*input_X_t), memoryOffset);
+      relu_surf->src_data.offset = X_cube.size;
+    } else {
+      NvDlaBackendMeta::Offset memoryOffset = X_cube.size;
+      relu_surf->src_data.address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*input_X_t), memoryOffset);
+    }
+  }
+//   relu_surf->src_data.size               = m_pMeta.getMemoryListEntrySize(*input_X_t);
+  relu_surf->src_data.size               = X_cube.size;
   relu_surf->src_data.width              = X_cube.dim_w;
   relu_surf->src_data.height             = X_cube.dim_h;
   relu_surf->src_data.channel            = X_cube.dim_c;
@@ -86,8 +107,27 @@ PP_DEFINE_VISIT(Relu, pOp)
   relu_surf->src_data.plane_stride       = X_cube.stride_plane;
 
   relu_surf->dst_data.type         = DLA_MEM_MC;
-  relu_surf->dst_data.address      = issueDlaAddr(*output_Y_t, Y_cube);
-  relu_surf->dst_data.size         = m_pMeta.getMemoryListEntrySize(*output_Y_t);
+  // relu_surf->dst_data.address      = issueDlaAddr(*output_Y_t, Y_cube);
+  if (nn == 0) {
+      relu_surf->dst_data.address = issueDlaAddr(*output_Y_t, Y_cube);
+  } else {
+    onnc::Tensor* output_Y_tt = output_Y_t->clone();
+    const bool isOutput = isa<OutputOperator>(getConsumer(*output_Y_tt, 0));
+    if (!isOutput) {
+      NvDlaBackendMeta::Offset memoryOffset = 0;
+      relu_surf->dst_data.address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*output_Y_t), memoryOffset);
+      relu_surf->dst_data.offset = Y_cube.size;
+    } else {
+      NvDlaBackendMeta::Offset memoryOffset = Y_cube.size;
+      relu_surf->dst_data.address =
+        m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*output_Y_t), memoryOffset);
+    }
+  }
+  // We define a single memory list entry for all batches
+  // So, memory list entry size is not equal to the dst_data size
+//   relu_surf->dst_data.size         = m_pMeta.getMemoryListEntrySize(*output_Y_t);
+  relu_surf->dst_data.size         = Y_cube.size;
   relu_surf->dst_data.width        = Y_cube.dim_w;
   relu_surf->dst_data.height       = Y_cube.dim_h;
   relu_surf->dst_data.channel      = Y_cube.dim_c;
@@ -95,5 +135,18 @@ PP_DEFINE_VISIT(Relu, pOp)
   relu_surf->dst_data.surf_stride  = Y_cube.stride_surface;
   relu_surf->dst_data.plane_stride = Y_cube.stride_plane;
 
-  issueDlaOp(relu_op, NULL, m_pMeta.m_pPrevOp);
+  // issueDlaOp(relu_op, NULL, m_pMeta.m_pPrevOp);
+  relu_ops.push_back(relu_op);
+
+  } // BATCHES
+
+  uint32_t num_ops = m_pMeta.m_DLAOperationList.size();
+  if (num_ops >= BATCH_NUM) {
+    outs() << "[ReLU] Creating prev_ops list... (num ops: " << num_ops << ")\n";
+    for (int nn = 0; nn < BATCH_NUM; nn++) {
+        outs() << "Getting #" << (num_ops-BATCH_NUM+nn) << " op\n";
+        prev_ops.push_back(m_pMeta.m_DLAOperationList[num_ops-BATCH_NUM+nn]);
+    }
+  }
+  issueDlaOpBatched(relu_ops, fuse_ops, prev_ops);
 }

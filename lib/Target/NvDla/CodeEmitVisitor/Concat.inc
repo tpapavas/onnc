@@ -100,8 +100,8 @@ PP_DEFINE_VISIT(Concat, pOp)
                 surf_stride.push_back(genmem::Cube::get_compact_surface_stride(genmem::Cube::TYPE::CUBE, W[i], H[i] ,C[i]));
                 planar_stride.push_back( -1 );
 
-                genmem::Cube input_cube(genmem::Cube::TYPE::CUBE, W[i], H[i], C[i], line_stride[i], surf_stride[i], planar_stride[i]);
-                input_cube.address_entry = mem.request_memory_with_mid(input_cube.used_entry_number(), input_mid[i]);
+                genmem::Cube input_cube(genmem::Cube::TYPE::CUBE, W[i], H[i], C[i], line_stride[i], surf_stride[i], planar_stride[i], BATCH_NUM);
+                input_cube.address_entry = mem.request_memory_with_mid(input_cube.used_entry_number()*input_cube.batch_num, input_mid[i]);
                 input_cubes.push_back(input_cube);
         }
 
@@ -109,16 +109,33 @@ PP_DEFINE_VISIT(Concat, pOp)
         int line_stride_output = genmem::Cube::get_compact_line_stride(genmem::Cube::TYPE::CUBE, output_tensor_dim[3], output_tensor_dim[2], output_tensor_dim[1]);
         int surf_stride_output = genmem::Cube::get_compact_surface_stride(genmem::Cube::TYPE::CUBE, output_tensor_dim[3], output_tensor_dim[2], output_tensor_dim[1]);
 
-        genmem::Cube output_cube(genmem::Cube::TYPE::CUBE, output_tensor_dim[3], output_tensor_dim[2], output_tensor_dim[1], line_stride_output, surf_stride_output, -1);
+        genmem::Cube output_cube(genmem::Cube::TYPE::CUBE, output_tensor_dim[3], output_tensor_dim[2], output_tensor_dim[1], line_stride_output, surf_stride_output, -1, BATCH_NUM);
 	assert(output_cube.used_entry_number()*genmem::memWidth == output_mle.size);
-        output_cube.address_entry = mem.request_memory_with_mid(output_cube.used_entry_number(), output_mid);
+        output_cube.address_entry = mem.request_memory_with_mid(output_cube.used_entry_number()*output_cube.batch_num, output_mid);
 
         // 3. concat
         std::vector<genmem::Register> regs;
 	axis -= 1;
         genmem::Concat::concat(input_cubes, output_cube, mem, regs, axis, input_tensor_num);
         auto nvdla_ops = genmem::genmemRegisterToDalOp(m_pMeta, regs, mem);
-				for(auto* op : nvdla_ops) issueDlaOp(op, NULL, m_pMeta.m_pPrevOp);
+				// for(auto* op : nvdla_ops) issueDlaOp(op, NULL, m_pMeta.m_pPrevOp);
+        std::vector<NvDlaDlaOperation*> fuse_ops;
+        std::vector<NvDlaDlaOperation*> prev_ops;
+
+        uint32_t num_ops = m_pMeta.m_DLAOperationList.size();
+        uint32_t num_rubik_ops = BATCH_NUM*(input_tensor_num+1);
+        if (num_ops >= BATCH_NUM) {
+            outs() << "[Concat] Creating prev_ops list... (num ops: " << num_ops << ")\n";
+            for (int nn = 0; nn < BATCH_NUM; nn++) {
+                outs() << "Getting #" << (num_ops-BATCH_NUM+nn) << " op\n";
+                prev_ops.push_back(m_pMeta.m_DLAOperationList[num_ops-BATCH_NUM+nn]);
+            }
+        }
+        for (int nn = 0; nn < num_rubik_ops-BATCH_NUM; nn++) {
+            outs() << "Getting #" << (nn) << " rubik op\n";
+            prev_ops.push_back(nvdla_ops[nn]);
+        }
+        issueDlaOpBatched(nvdla_ops, fuse_ops, prev_ops, input_tensor_num+1);
 				
 
         assert( mem.genmem_addrress_entry_to_mid(output_cube.address_entry) == output_mid);

@@ -218,6 +218,8 @@ public:
   std::size_t            nextDlaTaskLocalIndex() noexcept;
   bool                   isLastDlaOperationInTaskEntry(const NvDlaDlaOperation& operation) const;
   static MemoryListEntryId getInvalidMemoryListEntryId();
+  uint32_t               getBatchNum() const;
+  void                   setBatchNum(uint32_t batch_num);
 
 public:
   // memory allocation information for runtime (firmwares, memory buffer)

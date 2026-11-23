@@ -127,6 +127,10 @@ NvDlaBackend::NvDlaBackend(const TargetOptions& pOptions)
                       m_VerboseLevel)
 {
   m_pMemInfo = std::make_unique<NvDlaTargetMemInfo>();
+
+  setBatchNum(pOptions.getBatchNum());
+  m_pMeta.setBatchNum(pOptions.getBatchNum());
+  m_CodeEmitVisitor.setBatchNum(pOptions.getBatchNum());
 }
 
 void NvDlaBackend::addTensorSel(PassManager& passManager)

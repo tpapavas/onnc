@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <onnc/Support/IOStream.h>
 
 using namespace genmem;
 
@@ -34,13 +35,16 @@ vector<onnc::NvDlaDlaOperation*> genmem::genmemRegisterToDalOp(onnc::NvDlaBacken
     mle_info.should_alloc = false;
   }
 
+  uint16_t nn = 0; // current batch
   // 2. turn to NvDlaDlaOperation
   vector<onnc::NvDlaDlaOperation*> ops;
   for (const auto& reg : regs) {
+    onnc::outs() << "[RUBIK] reg " << nn << "\n";
     if (reg.rubik_mode != BDMAMODE)
       ops.push_back(rubik_register_to_dla(m_pMeta, reg, memory));
     else
       ops.push_back(bdma_register_to_dla(m_pMeta, reg, memory));
+    nn = (nn + 1) % m_pMeta.getBatchNum();
   }
   return ops;
 }

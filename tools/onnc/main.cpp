@@ -72,6 +72,16 @@ static cl::opt<std::string> OptOpMapper("op-mapper", cl::kLong, cl::kOptional,
     cl::init("dla_only"),
     cl::about(g_About));
 
+static cl::opt<uint32_t>
+OptBatchNum("batches",
+    cl::kLong,
+    cl::kOptional,
+    cl::kValueRequired,
+    cl::kEqualSeparated,
+    cl::desc("Set number of batches to <number> (default is 1)."),
+    cl::init(1),
+    cl::about(g_About));
+
 //===----------------------------------------------------------------------===//
 // Main Procedure
 //===----------------------------------------------------------------------===//
@@ -81,6 +91,8 @@ int main(int pArgc, char* pArgv[])
 
   // -verbose=level
   onnc.options().setVerbose(OptVerbose);
+
+  onnc.options().setBatchNum(OptBatchNum);
 
   // -v
   if (OptV.hasOccurrence())

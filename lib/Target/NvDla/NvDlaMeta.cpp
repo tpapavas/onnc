@@ -441,6 +441,10 @@ bool NvDlaBackendMeta::isLastDlaOperationInTaskEntry(const NvDlaDlaOperation& op
 
 MemoryListEntryId NvDlaBackendMeta::getInvalidMemoryListEntryId() { return static_cast<MemoryListEntryId>(-1); }
 
+uint32_t NvDlaBackendMeta::getBatchNum() const { return NvDlaConstants::getBatchNum(); }
+
+void NvDlaBackendMeta::setBatchNum(uint32_t batch_num) { NvDlaConstants::setBatchNum(batch_num); }
+
 bool NvDlaBackendMeta::hasAddressListEntry(MemoryListEntryId memoryId, Offset offset) const
 {
   using std::end;

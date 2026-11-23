@@ -92,7 +92,7 @@ Pass::ReturnType NvDlaMemInfoPass::runOnModule(Module& pModule)
     if (isInput && !m_pMeta->hasMemoryListEntry(*tensor)) {
       const MemoryListEntryId memoryId =
         m_pMeta->allocateMemoryFor(*tensor, ILoadable::MemoryDomain_SYSMEM,
-                                   ILoadable::MemoryFlags_ALLOC | ILoadable::MemoryFlags_INPUT, cubeinfo.size);
+                                   ILoadable::MemoryFlags_ALLOC | ILoadable::MemoryFlags_INPUT, cubeinfo.size*getBatchNum());
 
       ILoadable::TensorDescListEntry tle;
       tle.name   = "data";
@@ -125,7 +125,7 @@ Pass::ReturnType NvDlaMemInfoPass::runOnModule(Module& pModule)
       const NvDlaBackendMeta::MemoryFlags flags    = ILoadable::MemoryFlags_ALLOC | ILoadable::MemoryFlags_OUTPUT;
       MemoryListEntryId                   memoryId = NvDlaBackendMeta::getInvalidMemoryListEntryId();
       if (m_pMeta->shouldOwnMemory(*tensor)) {
-        memoryId = m_pMeta->allocateMemoryFor(*tensor, ILoadable::MemoryDomain_SYSMEM, flags, cubeinfo.size,
+        memoryId = m_pMeta->allocateMemoryFor(*tensor, ILoadable::MemoryDomain_SYSMEM, flags, cubeinfo.size*getBatchNum(),
                                               true /* is output */);
       } else {
         NvDlaBackendMeta::MemoryListEntry& memory = m_pMeta->getMemoryListEntry(*tensor);
@@ -165,7 +165,7 @@ Pass::ReturnType NvDlaMemInfoPass::runOnModule(Module& pModule)
       m_pMeta->m_TensorDescListEntries.push_back(tle);
     } else {
       m_pMeta->tryAllocateMemoryFor(*tensor, ILoadable::MemoryDomain_SYSMEM, ILoadable::MemoryFlags_ALLOC,
-                                    cubeinfo.size);
+                                    cubeinfo.size*getBatchNum());
     }
   }
 

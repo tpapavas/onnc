@@ -9,6 +9,12 @@ PP_DEFINE_VISIT(Conv, pOp)
 
     return;
   }
+
+  std::vector<NvDlaDlaOperation*> conv_ops;
+  std::vector<NvDlaDlaOperation*> add_ops;
+  std::vector<NvDlaDlaOperation*> prev_ops;
+  outs() << "BATCH = " << BATCH_NUM << "\n";
+  for (int nn = 0; nn < BATCH_NUM; nn++ ) {
   const Tensor* input_X_t       = pOp.getInput(0);
   int32_t       input_X_ndim    = input_X_t->getNumOfDimensions();
   int32_t       input_X_dims[4] = {1, 1, 1, 1};
@@ -138,6 +144,10 @@ PP_DEFINE_VISIT(Conv, pOp)
     NvDlaCubeInfo winfo(*this, NVDLA_CUBE_WEIGHT, input_W_dims[0],
                         numWeightFrontPaddingChannels + numInputChannelsPerGroup, input_W_dims[2], input_W_dims[3]);
 
+    /**
+     * TODO: Check if weights are allocated
+     * again for every new batch instance.
+     */
     // Weight Memory allocation, repacking by groups
     int W_mid = -1;
     W_mid = packWeight(*input_W_t, NvDlaDims(input_W_dims), numWeightFrontPaddingChannels, outputChannelOffset);
@@ -313,8 +323,31 @@ PP_DEFINE_VISIT(Conv, pOp)
       conv_surf->wgs_data.address = -1;
 
       conv_surf->src_data.type = DLA_MEM_MC;
-      conv_surf->src_data.address =
-        issueDlaAddr(*input_X_t, X_cube, alignedInputChannelOffset, std::max(input_h_idx, 0));
+      // conv_surf->src_data.address =
+      //   issueDlaAddr(*input_X_t, X_cube, alignedInputChannelOffset, std::max(input_h_idx, 0));
+
+      if (nn == 0) {
+          conv_surf->src_data.address =
+            issueDlaAddr(*input_X_t, X_cube, alignedInputChannelOffset, std::max(input_h_idx, 0));
+      } else {
+        /**
+         * NOTE: This does not handle split-conv cases.
+         */
+        const bool isInput = isa<InputOperator>(getProducer(*input_X_t));
+        if (!isInput) {
+        //   const MemoryListEntryId memoryId = m_pMeta.allocateMemory(ILoadable::MemoryDomain_SYSMEM, ILoadable::MemoryFlags_ALLOC, X_cube.size);
+        //   conv_surf->src_data.address =
+        //     m_pMeta.acquireMemory(memoryId, 0);
+          NvDlaBackendMeta::Offset memoryOffset = 0;
+          conv_surf->src_data.address =
+            m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*input_X_t), memoryOffset);
+          conv_surf->src_data.offset = X_cube.size;
+        } else {
+          NvDlaBackendMeta::Offset memoryOffset = X_cube.size;
+          conv_surf->src_data.address =
+            m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*input_X_t), memoryOffset);
+        }
+      }
       conv_surf->src_data.size         = finfo.size;
       conv_surf->src_data.width        = finfo.dim_w;
       conv_surf->src_data.height       = finfo.dim_h;
@@ -472,7 +505,27 @@ PP_DEFINE_VISIT(Conv, pOp)
       }
 
       add_surf->dst_data.type         = DLA_MEM_MC;
-      add_surf->dst_data.address      = issueDlaAddr(*output_Y_t, Y_cube, alignedOutputChannelOffset, output_h_idx);
+      // add_surf->dst_data.address      = issueDlaAddr(*output_Y_t, Y_cube, alignedOutputChannelOffset, output_h_idx);
+      if (nn == 0) {
+          add_surf->dst_data.address =
+            issueDlaAddr(*output_Y_t, Y_cube, alignedOutputChannelOffset, output_h_idx);
+      } else {
+        /**
+         * NOTE: This does not handle split-conv cases.
+         */
+        onnc::Tensor* output_Y_tt = output_Y_t->clone();
+        const bool isOutput = isa<OutputOperator>(getConsumer(*output_Y_tt, 0));
+        if (!isOutput) {
+          NvDlaBackendMeta::Offset memoryOffset = 0;
+          add_surf->dst_data.address =
+            m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*output_Y_t), memoryOffset);
+          add_surf->dst_data.offset = Y_cube.size;
+        } else {
+          NvDlaBackendMeta::Offset memoryOffset = Y_cube.size;
+          add_surf->dst_data.address =
+            m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(*output_Y_t), memoryOffset);
+        }
+      }
       add_surf->dst_data.size         = conv_surf->dst_data.size;
       add_surf->dst_data.width        = conv_surf->dst_data.width;
       add_surf->dst_data.height       = conv_surf->dst_data.height;
@@ -481,8 +534,18 @@ PP_DEFINE_VISIT(Conv, pOp)
       add_surf->dst_data.surf_stride  = conv_surf->dst_data.surf_stride;
       add_surf->dst_data.plane_stride = conv_surf->dst_data.plane_stride;
 
-      NvDlaDlaOperation* prev_op = (is_first_split) ? m_pMeta.m_pPrevOp : NULL;
-      issueDlaOp(conv_op, add_op, prev_op);
+      // NvDlaDlaOperation* prev_op = (is_first_split) ? m_pMeta.m_pPrevOp : NULL;
+      // NvDlaDlaOperation* prev_op;
+      // if (prev_ops.size() < 1) {
+      //   prev_op = (is_first_split) ? m_pMeta.m_pPrevOp : NULL;
+      // } else {
+      //   prev_op = (is_first_split) ? add_ops.back() : NULL;
+      // }
+      conv_ops.push_back(conv_op);
+      add_ops.push_back(add_op);
+      // prev_ops.push_back(prev_op);
+
+      // issueDlaOp(conv_op, add_op, prev_op);
 
       output_h_idx = output_h_idx + output_split_height;
       input_h_idx  = stride_y * output_h_idx - pad_top;
@@ -490,4 +553,16 @@ PP_DEFINE_VISIT(Conv, pOp)
       is_first_split = false;
     } while (!is_last_split);
   }
+
+  } // BATCHES
+
+  uint32_t num_ops = m_pMeta.m_DLAOperationList.size();
+  if (num_ops >= BATCH_NUM) {
+    outs() << "[CONV] Creating prev_ops list... (num ops: " << num_ops << ")\n";
+    for (int nn = 0; nn < BATCH_NUM; nn++) {
+      outs() << "Getting #" << (num_ops-BATCH_NUM+nn) << " op\n";
+      prev_ops.push_back(m_pMeta.m_DLAOperationList[num_ops-BATCH_NUM+nn]);
+    }
+  }
+  issueDlaOpBatched(conv_ops, add_ops, prev_ops);
 }

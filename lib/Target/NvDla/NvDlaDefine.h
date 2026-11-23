@@ -14,6 +14,7 @@
 
 #include <onnc/IR/Compute/Tensor.h>
 #include <onnc/Target/TargetOptions.h>
+#include <onnc/Support/IOStream.h>
 
 #include <cassert>
 #include <cstdint>
@@ -135,6 +136,19 @@ public:
   int getBlobOffsetForImageWeight(int k, int c, int h, int w, NvDlaDims dims);
   int getBlobOffsetForSDPOperand(int c, int h, int w, const NvDlaCubeInfo& cubeInfo);
 
+  uint32_t getBatchNum() const { return BATCH_NUM; }
+  bool setBatchNum(uint32_t bn) {
+    /**
+     * TODO: do not let BATCH_NUM
+     * to be reset
+     */
+    outs() << "Setting batch number from " << BATCH_NUM
+           << " to " << bn << "\n";
+    BATCH_NUM = bn;
+
+    return true;
+  }
+
 protected:
   nvdla::ConfigSet            CONFIG_SET;
   nvdla::ExecutionMode        EXECUTION_MODE;
@@ -152,6 +166,8 @@ protected:
   ::nvdla::loadable::DataType DATA_TYPE;
   std::uint8_t                INPUT_PIXEL_FORMAT;
   std::uint8_t                OUTPUT_PIXEL_FORMAT;
+
+  std::uint32_t                BATCH_NUM = 1;
 };
 
 template <nvdla::ConfigSet CS>
