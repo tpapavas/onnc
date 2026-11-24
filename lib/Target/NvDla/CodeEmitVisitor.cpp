@@ -1189,6 +1189,13 @@ void CodeEmitVisitor::emitSdp(const ComputeOperator& op, const Tensor& first, co
   std::vector<NvDlaDlaOperation*> sdp_ops;
   std::vector<NvDlaDlaOperation*> fuse_ops;
   std::vector<NvDlaDlaOperation*> prev_ops;
+
+  // A constant x1 operand is identical for every batch instance: pack it once
+  // (first batch) and let all batches share that memory entry. packSDPOperand()
+  // does not bind the blob to the tensor, so it can't be looked up later via
+  // getMemoryListEntryId(second) -- keep its id here instead.
+  MemoryListEntryId constOperandMid = NvDlaBackendMeta::getInvalidMemoryListEntryId();
+
   for (int nn = 0; nn < BATCH_NUM; nn++ ) {
 
   assert(!isConstant(first));
@@ -1327,7 +1334,16 @@ void CodeEmitVisitor::emitSdp(const ComputeOperator& op, const Tensor& first, co
 
     int16_t x1_data_address = -1;
     uint32_t x1_data_offset = 0;
-    if (nn == 0) {
+    if (isConstant(second)) {
+      // Constant operand: packed once, shared by all batches (offset 0).
+      if (nn == 0) {
+        x1_data_address = issueSDPOperand(second, secondCubeInfo, memoryId);
+        constOperandMid = memoryId;
+      } else {
+        assert(constOperandMid != NvDlaBackendMeta::getInvalidMemoryListEntryId());
+        x1_data_address = issueDlaAddr(constOperandMid, secondCubeInfo); // dedup'd by acquireMemory
+      }
+    } else if (nn == 0) {
       x1_data_address = issueSDPOperand(second, secondCubeInfo, memoryId);
     } else {
       const bool isInput = isa<InputOperator>(getProducer(second));
@@ -1335,9 +1351,9 @@ void CodeEmitVisitor::emitSdp(const ComputeOperator& op, const Tensor& first, co
         NvDlaBackendMeta::Offset memoryOffset = 0;
         x1_data_address =
           m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(second), memoryOffset);
-        x1_data_offset = isConstant(second) ? 0 : secondCubeInfo.size; // maybe offset = (size x nn)
+        x1_data_offset = secondCubeInfo.size; // maybe offset = (size x nn)
       } else {
-        NvDlaBackendMeta::Offset memoryOffset = isConstant(second) ? 0 : secondCubeInfo.size; // maybe offset = (size x nn)
+        NvDlaBackendMeta::Offset memoryOffset = secondCubeInfo.size; // maybe offset = (size x nn)
         x1_data_address =
           m_pMeta.acquireMemory(m_pMeta.getMemoryListEntryId(second), memoryOffset);
       }

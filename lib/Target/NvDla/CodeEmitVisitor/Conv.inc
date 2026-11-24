@@ -13,6 +13,19 @@ PP_DEFINE_VISIT(Conv, pOp)
   std::vector<NvDlaDlaOperation*> conv_ops;
   std::vector<NvDlaDlaOperation*> add_ops;
   std::vector<NvDlaDlaOperation*> prev_ops;
+
+  // Constant operands (weights / bias / requant multipliers) are identical for
+  // every batch instance. Pack them once (on the first batch) per group and
+  // reuse the same memory entries for the remaining batches; acquireMemory()
+  // dedups the address-list entry for an identical (memoryId, offset).
+  struct ConvConstMids {
+    int W  = -1;
+    int B  = -1;
+    int M  = -1;
+    int Bq = -1;
+  };
+  std::vector<ConvConstMids> groupConsts(pOp.getGroup().value());
+
   outs() << "BATCH = " << BATCH_NUM << "\n";
   for (int nn = 0; nn < BATCH_NUM; nn++ ) {
   const Tensor* input_X_t       = pOp.getInput(0);
@@ -144,44 +157,44 @@ PP_DEFINE_VISIT(Conv, pOp)
     NvDlaCubeInfo winfo(*this, NVDLA_CUBE_WEIGHT, input_W_dims[0],
                         numWeightFrontPaddingChannels + numInputChannelsPerGroup, input_W_dims[2], input_W_dims[3]);
 
-    /**
-     * TODO: Check if weights are allocated
-     * again for every new batch instance.
-     */
-    // Weight Memory allocation, repacking by groups
-    int W_mid = -1;
-    W_mid = packWeight(*input_W_t, NvDlaDims(input_W_dims), numWeightFrontPaddingChannels, outputChannelOffset);
+    // Constant memory (weights/bias/requant) is packed only for the first batch
+    // instance and shared by all batches -- no per-batch duplication.
+    ConvConstMids& consts = groupConsts[groupIdx];
+    if (nn == 0) {
+      // Weight Memory allocation, repacking by groups
+      consts.W = packWeight(*input_W_t, NvDlaDims(input_W_dims), numWeightFrontPaddingChannels, outputChannelOffset);
 
-    int W_addr = issueDlaAddr(W_mid, winfo);
-    int B_mid  = -1;
-    int B_addr = -1;
+      // FP16 / non-requant path uses the fp16 bias here; INT8 requant uses the
+      // int16 output-domain bias (Bq) packed below, so skip this zero blob then.
+      if (pOp.hasBias() && !int8Requant) {
+        consts.B = packBias(*input_B_t, numOutputChannelsPerGroup, outputChannelOffset);
+      }
+
+      // INT8: emit this group's per-kernel requant multipliers as a 2-byte SDP
+      // operand cube (consumed by the bias-add SDP's x1 MUL stage below).
+      if (int8Requant) {
+        consts.M = packRequantMul(requantMult, numOutputChannelsPerGroup, outputChannelOffset);
+      }
+
+      // INT8: this group's per-kernel int16 bias (output domain) for the SDP X2 ADD.
+      if (int8Requant && pOp.hasBias() && !requantBias.empty()) {
+        consts.Bq = packRequantMul(requantBias, numOutputChannelsPerGroup, outputChannelOffset);
+      }
+    }
 
     NvDlaCubeInfo B_info(*this, NVDLA_CUBE_FEATURE, numOutputChannelsPerGroup, 1, 1, 1);
-
-    // FP16 / non-requant path uses the fp16 bias here; INT8 requant uses the
-    // int16 output-domain bias (Bq) packed below, so skip this zero blob then.
-    if (pOp.hasBias() && !int8Requant) {
-      B_mid  = packBias(*input_B_t, numOutputChannelsPerGroup, outputChannelOffset);
-      B_addr = issueDlaAddr(B_mid, B_info);
-    }
-
-    // INT8: emit this group's per-kernel requant multipliers as a 2-byte SDP
-    // operand cube (consumed by the bias-add SDP's x1 MUL stage below).
-    int           M_mid  = -1;
-    int           M_addr = -1;
     NvDlaCubeInfo M_info(*this, NVDLA_CUBE_SDP_X_ALU_OR_MUL_TWO_BYTE, 1, numOutputChannelsPerGroup, 1, 1);
-    if (int8Requant) {
-      M_mid  = packRequantMul(requantMult, numOutputChannelsPerGroup, outputChannelOffset);
-      M_addr = issueDlaAddr(M_mid, M_info);
-    }
 
-    // INT8: this group's per-kernel int16 bias (output domain) for the SDP X2 ADD.
-    int Bq_mid  = -1;
-    int Bq_addr = -1;
-    if (int8Requant && pOp.hasBias() && !requantBias.empty()) {
-      Bq_mid  = packRequantMul(requantBias, numOutputChannelsPerGroup, outputChannelOffset);
-      Bq_addr = issueDlaAddr(Bq_mid, M_info);
-    }
+    // issueDlaAddr -> acquireMemory returns the existing address entry when the
+    // same memory id is acquired again, so all batches share the same addresses.
+    const int W_mid   = consts.W;
+    const int B_mid   = consts.B;
+    const int M_mid   = consts.M;
+    const int Bq_mid  = consts.Bq;
+    const int W_addr  = issueDlaAddr(W_mid, winfo);
+    const int B_addr  = (B_mid >= 0) ? issueDlaAddr(B_mid, B_info) : -1;
+    const int M_addr  = (M_mid >= 0) ? issueDlaAddr(M_mid, M_info) : -1;
+    const int Bq_addr = (Bq_mid >= 0) ? issueDlaAddr(Bq_mid, M_info) : -1;
 
     int pad_top       = pads[0];
     int pad_left      = pads[1];
